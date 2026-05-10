@@ -15,6 +15,7 @@ from zendriver import cdp
 
 import util
 from nodriver_common import (
+    fetch_notification_extras,
     nodriver_check_modal_dialog_popup,
     play_sound_while_ordering,
     send_discord_notification,
@@ -2623,8 +2624,9 @@ async def nodriver_hkticketing_main(tab, url, config_dict):
         if not _state.get("played_sound_order", False):
             if config_dict["advanced"]["play_sound"]["order"]:
                 play_sound_while_ordering(config_dict)
-            send_discord_notification(config_dict, "order", "HKTicketing")
-            send_telegram_notification(config_dict, "order", "HKTicketing")
+            extras = await fetch_notification_extras(tab, "HKTicketing")
+            send_discord_notification(config_dict, "order", "HKTicketing", **extras)
+            send_telegram_notification(config_dict, "order", "HKTicketing", **extras)
         _state["played_sound_order"] = True
 
         # Show message once

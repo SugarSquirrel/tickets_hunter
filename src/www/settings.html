@@ -88,6 +88,17 @@
       border-color: #6ea8fe !important;
       box-shadow: 0 0 0 0.25rem rgba(110, 168, 254, 0.25) !important;
     }
+
+    .notification-message-example {
+      background-color: #fff !important;
+      color: #000 !important;
+      border: 1px solid var(--bs-border-color);
+    }
+
+    [data-bs-theme="dark"] .notification-message-example {
+      background-color: #000 !important;
+      color: #fff !important;
+    }
   </style>
 </head>
 <body>
@@ -414,7 +425,96 @@
               <option value="random">
                 random
               </option>
+              <option value="price range max remaining">
+                智能選擇 - 價位過濾 + 剩餘最多優先（僅限 TixCraft）
+              </option>
             </select>
+          </div>
+        </div>
+        <div class="row mb-3 smart-only" id="row_price_filter" style="display:none;">
+          <label for="area_price_filter" class="col-sm-2 col-form-label">接受的價位</label>
+          <div class="col-sm-10 col-lg-8 col-xl-6">
+            <input class="form-control" id="area_price_filter" type="text" autocomplete="off" placeholder="例如 4480-6680 或 4480;6680 或 -5000（留空 = 不限）" />
+            <small class="form-text text-muted d-block mt-1">
+              僅在「智能選擇」模式生效。<code>4,480</code> 與 <code>4480</code> 等同（自動忽略逗號、空格、貨幣符號）。
+            </small>
+            <details class="mt-2">
+              <summary class="text-muted small" style="cursor:pointer;">📌 價位寫法一覽（點擊展開）</summary>
+              <div class="mt-2 small">
+                <table class="table table-sm table-bordered mb-2">
+                  <thead><tr><th style="width:30%">寫法</th><th>意思</th></tr></thead>
+                  <tbody>
+                    <tr><td>（留空）</td><td>不限價位，所有可用區域都列入候選</td></tr>
+                    <tr><td><code>4480</code></td><td>只接受 4480 元的區域</td></tr>
+                    <tr><td><code>4,480</code></td><td>同上（千分位逗號自動忽略）</td></tr>
+                    <tr><td><code>4480;6680</code></td><td>4480 <strong>或</strong> 6680（用 <code>;</code> 分隔多個價位）</td></tr>
+                    <tr><td><code>4480-6680</code></td><td>4480 到 6680 之間（連續區間）</td></tr>
+                    <tr><td><code>-5000</code></td><td>5000 以下（無下限）</td></tr>
+                    <tr><td><code>4480-</code></td><td>4480 以上（無上限）</td></tr>
+                    <tr><td><code>3000-4500;6680;8000-9000</code></td><td>多個區間 + 單一價混合</td></tr>
+                  </tbody>
+                </table>
+                <p class="mb-0 text-muted">票價數字必須 ≥ 100 才會被當價錢解析（避免把「剩餘 5」誤判成價錢 5 元）。</p>
+              </div>
+            </details>
+          </div>
+        </div>
+        <div class="row mb-3 smart-only" id="row_smart_sort" style="display:none;">
+          <label for="smart_sort_priority" class="col-sm-2 col-form-label">排序優先</label>
+          <div class="col-sm-10 col-lg-8 col-xl-6">
+            <select id="smart_sort_priority" class="form-select">
+              <option value="max remaining">最高剩餘優先（預設・穩定）</option>
+              <option value="min remaining">最少剩餘優先（搶救快賣完的）</option>
+              <option value="price high">從高價先搶（VIP 偏好）</option>
+              <option value="price low">從低價先搶（省錢偏好）</option>
+              <option value="random">隨機（同條件下隨機分散）</option>
+            </select>
+            <small class="form-text text-muted d-block mt-1">
+              通過所有篩選後，要先抓哪一個。同票價時改用剩餘張數當第二排序鍵。
+            </small>
+            <details class="mt-2">
+              <summary class="text-muted small" style="cursor:pointer;">📌 智能選擇模式 — 完整使用說明（點擊展開）</summary>
+              <div class="mt-2 small">
+                <p class="mb-2"><strong>運作流程</strong>：對每個區域依序檢查 ① ~ ④ 全部通過才列入候選，最後依 ⑤ 排序挑第一個。</p>
+                <table class="table table-sm table-bordered mb-2">
+                  <thead><tr><th style="width:25%">步驟</th><th>條件</th><th style="width:30%">不通過時</th></tr></thead>
+                  <tbody>
+                    <tr><td>① 區域關鍵字</td><td>套用上方「區域關鍵字」欄位（智能匹配，見下表）</td><td>跳過此區域</td></tr>
+                    <tr><td>② 是否售完</td><td>該區域 <code>&lt;font&gt;</code> 不能是「已售完」</td><td>跳過此區域</td></tr>
+                    <tr><td>③ 票數夠</td><td>剩餘張數 ≥ 你設定的「票數」</td><td>跳過此區域</td></tr>
+                    <tr><td>④ 接受的價位</td><td>該區票價符合你填的價位規則（見上表）</td><td>跳過此區域</td></tr>
+                    <tr><td>⑤ 排序優先</td><td>依你選的排序方式排候選清單，取第一個</td><td>—</td></tr>
+                  </tbody>
+                </table>
+                <p class="mb-2"><strong>智能匹配規則（只在智能選擇模式下生效）：</strong></p>
+                <table class="table table-sm table-bordered mb-2">
+                  <thead><tr><th style="width:30%">你打的關鍵字</th><th>會匹配</th><th>不會匹配</th></tr></thead>
+                  <tbody>
+                    <tr><td><code>紅1區</code></td><td>紅1A區、紅1B區、紅1C區、紅1D區、紅1E區、紅1區</td><td>紅2A區、紅12A區、紫1A區</td></tr>
+                    <tr><td><code>紅1A區</code></td><td>只有紅1A區</td><td>紅1B區、紅2A區</td></tr>
+                    <tr><td><code>紅 1 區</code>（半形空白）</td><td>同 <code>紅1區</code></td><td>同上</td></tr>
+                    <tr><td><code>紅　1　區</code>（全形空白）</td><td>同 <code>紅1區</code></td><td>同上</td></tr>
+                    <tr><td><code>紅1區;紫1區</code></td><td>紅1 整區 <strong>或</strong> 紫1 整區（OR）</td><td>—</td></tr>
+                  </tbody>
+                </table>
+                <p class="mb-2"><strong>剩餘張數的判讀規則（依 TixCraft <code>&lt;font&gt;</code> 元素的文字）：</strong></p>
+                <table class="table table-sm table-bordered mb-2">
+                  <thead><tr><th style="width:30%">頁面顯示</th><th>解讀為</th></tr></thead>
+                  <tbody>
+                    <tr><td>熱賣中</td><td>999（視為最多）</td></tr>
+                    <tr><td>剩餘 25</td><td>25</td></tr>
+                    <tr><td>已售完</td><td>0（會被跳過）</td></tr>
+                  </tbody>
+                </table>
+                <p class="mb-2"><strong>常見問題：</strong></p>
+                <ul class="mb-2 ps-3">
+                  <li>所有區域都被濾掉 → 跟其他模式一樣，依上方「<strong>區域自動遞補</strong>」開關決定：關 = 不停 reload 頁面等票，開 = 放寬條件從全部可用區挑。</li>
+                  <li>智能模式下，「區域關鍵字」欄位中的<strong>空白會被當作「無意義字元」忽略</strong>（不再是 AND 分隔）。如果要表達 OR，請用 <code>;</code>。</li>
+                  <li>場館頁面如果不是把票價寫在每個區域行內（例如某些活動只在區段標題寫「3980-7880」、子區行只有「(best available) 已售完」）→ 該活動的「接受的價位」可能無法生效，請改用「區域關鍵字」鎖定區段。</li>
+                </ul>
+                <p class="mb-0 text-muted"><strong>限制：</strong>目前只有 TixCraft 一般售票流程支援（右側區域列表那種）。SVG 純圖型座位圖、Ticketmaster JSON zone 流程不適用，會 fallback 到「從上到下」行為。</p>
+              </div>
+            </details>
           </div>
         </div>
         <div class="row mb-3">
@@ -529,8 +629,45 @@
         <div class="row mb-3">
           <label for="notification_message" class="col-sm-2 col-form-label">通知訊息</label>
           <div class="col-sm-10 col-lg-8 col-xl-6">
-            <textarea class="form-control" id="notification_message" rows="2" placeholder="留空使用預設英文通知"></textarea>
-            <small class="form-text text-muted">搶到票時會將此訊息同時送到 Discord 與 Telegram。留空則維持原預設訊息。</small>
+            <textarea class="form-control" id="notification_message" rows="6" placeholder="留空使用預設英文通知"></textarea>
+            <small class="form-text text-muted d-block mt-1">
+              搶到票時會將此訊息同時送到 Discord 與 Telegram。留空則維持原預設英文訊息。
+              用 <code>{}</code> 包住變數名稱即可在訊息中插入動態內容（測試按鈕會用範例值預覽）。
+            </small>
+            <details class="mt-2">
+              <summary class="text-muted small" style="cursor:pointer;">📌 可用變數一覽（點擊展開）</summary>
+              <div class="mt-2 small">
+                <table class="table table-sm table-bordered mb-2">
+                  <thead><tr><th style="width:30%">變數</th><th style="width:20%">範例值</th><th>說明</th></tr></thead>
+                  <tbody>
+                    <tr><td><code>{platform}</code></td><td>TixCraft</td><td>觸發通知的售票平台名稱</td></tr>
+                    <tr><td><code>{stage}</code></td><td>order</td><td>通知階段（<code>ticket</code> = 找到票，<code>order</code> = 進結帳頁）</td></tr>
+                    <tr><td><code>{time}</code></td><td>14:09:53</td><td>觸發當下的時間 HH:MM:SS</td></tr>
+                    <tr><td><code>{date}</code></td><td>2026-05-10</td><td>觸發當下的日期 YYYY-MM-DD</td></tr>
+                    <tr><td><code>{datetime}</code></td><td>2026-05-10 14:09:53</td><td>完整日期 + 時間</td></tr>
+                    <tr><td><code>{account}</code></td><td>alice@example.com<br>session-3f9a2c1b</td><td>有帳號欄位的平台會直接顯示帳號（KKTIX/TicketPlus/KHAM/Cityline/HKTicketing 等）。<br>TixCraft / iBon / FunOne 只存登入 cookie，會顯示一段 SHA-256 指紋（同 cookie → 同指紋）讓你辨識是哪個帳號，不會洩漏 cookie 內容</td></tr>
+                    <tr><td><code>{event_name}</code></td><td>DXS [SERENADE] ON STAGE - KAOHSIUNG</td><td>從瀏覽器頁面標題（<code>document.title</code>）抓取，自動清掉「| tixcraft」「- KKTIX」這類站名後綴。若標題已切到結帳頁、不再顯示活動名，可能會變成「Checkout / 結帳」</td></tr>
+                    <tr><td><code>{url}</code></td><td>https://tixcraft.com/ticket/checkout</td><td>觸發通知當下的頁面網址，可以從手機通知直接點連結回去結帳</td></tr>
+                    <tr><td><code>{ticket_count}</code></td><td>2</td><td>通知時選到的張數。目前支援 TixCraft、KKTIX、KHAM；若頁面抓不到，會使用設定中的購票張數</td></tr>
+                  </tbody>
+                </table>
+                <div class="text-muted">
+                  <strong>規則：</strong>
+                  <ul class="mb-2 ps-3">
+                    <li>變數名稱必須<strong>用大括號包起來且不能有空白</strong>，例如 <code>{account}</code> 而非 <code>{ account }</code> 或 <code>account</code>。</li>
+                    <li>沒列在表格上的變數名稱<strong>不會被替換</strong>（會原樣顯示，例如打 <code>{xxx}</code> 通知中就會看到 <code>{xxx}</code>）。</li>
+                    <li>找不到資料的變數會替換成<strong>空字串</strong>（例如 TixCraft 的 <code>{account}</code>），不會中斷通知。</li>
+                    <li><code>{ticket_count}</code> 目前先支援 TixCraft、KKTIX、KHAM，其他平台未來可再補 selector。</li>
+                  </ul>
+                  <strong>範例：</strong>
+                  <pre class="notification-message-example p-2 mb-0" style="white-space:pre-wrap;">🎉 搶票成功！
+🎤 平台：{platform}
+👤 帳號：{account}
+🎫 張數：{ticket_count}
+⏰ 時間：{time}</pre>
+                </div>
+              </div>
+            </details>
           </div>
         </div>
 

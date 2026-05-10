@@ -124,6 +124,12 @@ def get_default_config():
     config_dict["area_auto_select"]["enable"] = True
     config_dict["area_auto_select"]["mode"] = CONST_SELECT_ORDER_DEFAULT
     config_dict["area_auto_select"]["area_keyword"] = ""
+    # Price filter for the "price range max remaining" mode (TixCraft only).
+    # Supports: "" (no limit), "4480", "4480;6680", "4480-6680", "-5000", "4480-".
+    config_dict["area_auto_select"]["price_filter"] = ""
+    # Within smart mode, which order to grab from the candidate set.
+    # See util.CONST_SMART_SORT_* for accepted values.
+    config_dict["area_auto_select"]["smart_sort_priority"] = "max remaining"
     config_dict["keyword_exclude"] = CONST_EXCLUDE_DEFAULT
 
     config_dict['kktix']={}
@@ -268,6 +274,26 @@ def migrate_config(config_dict):
     # Ensure advanced.discount_code exists
     if "advanced" in config_dict and "discount_code" not in config_dict["advanced"]:
         config_dict["advanced"]["discount_code"] = ""
+
+    # Migrate area_auto_select.price_min/price_max -> price_filter (single combined field)
+    if "area_auto_select" in config_dict and isinstance(config_dict["area_auto_select"], dict):
+        area = config_dict["area_auto_select"]
+        has_old_min = "price_min" in area and str(area.get("price_min", "")).strip()
+        has_old_max = "price_max" in area and str(area.get("price_max", "")).strip()
+        existing_filter = str(area.get("price_filter", "")).strip()
+        # Only migrate if the user hasn't already set the new field
+        if not existing_filter and (has_old_min or has_old_max):
+            pmin = str(area.get("price_min", "")).strip()
+            pmax = str(area.get("price_max", "")).strip()
+            if pmin and pmax:
+                area["price_filter"] = f"{pmin}-{pmax}"
+            elif pmin:
+                area["price_filter"] = f"{pmin}-"
+            elif pmax:
+                area["price_filter"] = f"-{pmax}"
+        # Drop deprecated keys regardless (clean up the JSON)
+        area.pop("price_min", None)
+        area.pop("price_max", None)
 
     # Ensure all default fields exist (fills missing keys from new versions)
     default = get_default_config()
@@ -610,7 +636,17 @@ class TestDiscordWebhookHandler(tornado.web.RequestHandler):
         debug = util.create_debug_logger(config_dict)
 
         custom_message = body.get("custom_message", "").strip()
-        content = custom_message if custom_message else "[Test] Tickets Hunter webhook test successful!"
+        if custom_message:
+            test_context = util.build_notification_context(
+                "order", "TestPlatform",
+                account="test_account",
+                event_name="測試演唱會",
+                ticket_count="2",
+                url="https://example.com/checkout",
+            )
+            content = util.apply_notification_placeholders(custom_message, test_context)
+        else:
+            content = "[Test] Tickets Hunter webhook test successful!"
         payload = {
             "content": content,
             "username": "Tickets Hunter"
@@ -666,7 +702,17 @@ class TestTelegramHandler(tornado.web.RequestHandler):
 
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
         custom_message = body.get("custom_message", "").strip()
-        text = custom_message if custom_message else "[Test] Tickets Hunter Telegram test successful!"
+        if custom_message:
+            test_context = util.build_notification_context(
+                "order", "TestPlatform",
+                account="test_account",
+                event_name="測試演唱會",
+                ticket_count="2",
+                url="https://example.com/checkout",
+            )
+            text = util.apply_notification_placeholders(custom_message, test_context)
+        else:
+            text = "[Test] Tickets Hunter Telegram test successful!"
         errors = []
         ok_count = 0
         for cid in chat_ids:

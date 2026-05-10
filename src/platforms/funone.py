@@ -14,6 +14,7 @@ except Exception:
 import util
 from nodriver_common import (
     check_and_handle_pause,
+    fetch_notification_extras,
     play_sound_while_ordering,
     send_discord_notification,
     send_telegram_notification,
@@ -2041,8 +2042,9 @@ async def nodriver_funone_main(tab, url, config_dict):
                     if not _state.get("played_sound_order", False):
                         if config_dict["advanced"]["play_sound"]["order"]:
                             play_sound_while_ordering(config_dict)
-                        send_discord_notification(config_dict, "order", "FunOne")
-                        send_telegram_notification(config_dict, "order", "FunOne")
+                        extras = await fetch_notification_extras(tab, "FunOne")
+                        send_discord_notification(config_dict, "order", "FunOne", **extras)
+                        send_telegram_notification(config_dict, "order", "FunOne", **extras)
                         _state["played_sound_order"] = True
                         debug.log("[FUNONE] Order reserved! Fill captcha then stop.")
 

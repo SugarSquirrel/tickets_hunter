@@ -212,31 +212,194 @@ def play_sound_while_ordering(config_dict):
     captcha_sound_filename = os.path.join(app_root, config_dict["advanced"]["play_sound"]["filename"].strip())
     util.play_mp3_async(captcha_sound_filename)
 
-def send_discord_notification(config_dict, stage, platform_name):
+# Map platform name (lowercased) -> account key in config_dict["accounts"].
+# These platforms store a human-readable username/email.
+_PLATFORM_ACCOUNT_KEYS = {
+    "kktix": "kktix_account",
+    "ticketplus": "ticketplus_account",
+    "kham": "kham_account",
+    "cityline": "cityline_account",
+    "hkticketing": "hkticketing_account",
+    "fansigo": "fansigo_account",
+    "fami": "fami_account",
+    "urbtix": "urbtix_account",
+    "ticket": "ticket_account",
+    "udn": "udn_account",
+}
+
+# Platforms that authenticate via session cookie / SID rather than a username.
+# We never expose the raw cookie in notifications; instead we surface a stable
+# SHA-256 fingerprint so the user can still tell different accounts apart.
+_PLATFORM_COOKIE_KEYS = {
+    "tixcraft": "tixcraft_sid",
+    "ibon": "ibonqware",
+    "funone": "funone_session_cookie",
+}
+
+
+def _fingerprint_cookie(cookie_value):
+    """Return a short, irreversible identifier for a session cookie.
+
+    Same input always yields the same output, so the user can map fingerprints
+    to their accounts. Raw cookie is never exposed.
+    """
+    try:
+        import hashlib
+        if not cookie_value:
+            return ""
+        digest = hashlib.sha256(str(cookie_value).encode("utf-8")).hexdigest()
+        return "session-" + digest[:8]
+    except Exception:
+        return ""
+
+
+def _resolve_account_for_platform(config_dict, platform_name):
+    """Best-effort lookup of an account identifier; never raises.
+
+    For platforms with username-style accounts, returns the username.
+    For cookie-only platforms, returns a stable fingerprint of the cookie.
+    """
+    try:
+        accounts = config_dict.get("accounts", {}) or {}
+        platform_lower = (platform_name or "").lower()
+        # Prefer human-readable account when available
+        key = _PLATFORM_ACCOUNT_KEYS.get(platform_lower)
+        if key:
+            value = accounts.get(key, "")
+            if value:
+                return value
+        # Fall back to cookie fingerprint for cookie-only platforms
+        cookie_key = _PLATFORM_COOKIE_KEYS.get(platform_lower)
+        if cookie_key:
+            return _fingerprint_cookie(accounts.get(cookie_key, ""))
+        return ""
+    except Exception:
+        return ""
+
+
+def _normalize_ticket_count(value):
+    """Return a positive integer string, or empty string if unavailable."""
+    try:
+        text = str(value).strip()
+        if not text:
+            return ""
+        if "." in text:
+            number = int(float(text))
+        else:
+            number = int(text)
+        return str(number) if number > 0 else ""
+    except Exception:
+        return ""
+
+
+async def fetch_notification_extras(tab, platform_name="", ticket_count=None):
+    """Best-effort grab of url, event_name, and ticket_count from the live tab.
+
+    Returns a dict suitable for passing as ``**kwargs`` to send_*_notification.
+    Never raises -- any failure becomes an empty value for that field, so the
+    notification still gets sent even if the page is in a weird state.
+    """
+    extras = {
+        "url": "",
+        "event_name": "",
+        "ticket_count": _normalize_ticket_count(ticket_count),
+    }
+    if tab is None:
+        return extras
+    try:
+        url = await tab.evaluate("window.location.href")
+        if url:
+            extras["url"] = str(url)
+    except Exception:
+        pass
+    try:
+        title = await tab.evaluate("document.title")
+        if title:
+            extras["event_name"] = util.clean_title_for_event_name(title, platform_name)
+    except Exception:
+        pass
+    try:
+        count = await tab.evaluate('''
+            (function() {
+                const selectors = [
+                    'select[id*="TicketForm_ticketPrice_"]',
+                    '.mobile-select',
+                    'input[ng-model="ticketModel.quantity"]',
+                    'input.number-step-input-core',
+                    'input[name^="tickets"]',
+                    '#AMOUNT',
+                    '#QRY2',
+                    '.yd_counterNum',
+                    'div.qty-select input[type="text"]'
+                ];
+                const values = [];
+                const seen = new Set();
+
+                for (const selector of selectors) {
+                    for (const el of document.querySelectorAll(selector)) {
+                        if (!el || seen.has(el)) continue;
+                        seen.add(el);
+                        if (el.disabled) continue;
+
+                        const raw = (el.value || el.getAttribute('value') || '').trim();
+                        if (!/^\\d+$/.test(raw)) continue;
+
+                        const value = parseInt(raw, 10);
+                        if (value > 0) values.push(value);
+                    }
+                }
+
+                if (values.length === 0) return '';
+                return String(values.reduce((sum, value) => sum + value, 0));
+            })();
+        ''')
+        count = _normalize_ticket_count(count)
+        if count:
+            extras["ticket_count"] = count
+    except Exception:
+        pass
+    return extras
+
+
+def _build_notification_context_safe(config_dict, stage, platform_name, **extra):
+    """Wrapper around util.build_notification_context that swallows errors."""
+    try:
+        if "account" not in extra or not extra.get("account"):
+            extra["account"] = _resolve_account_for_platform(config_dict, platform_name)
+        return util.build_notification_context(stage, platform_name, **extra)
+    except Exception:
+        return None
+
+
+def send_discord_notification(config_dict, stage, platform_name, **extra):
     """Send Discord webhook notification if configured.
 
     Args:
         config_dict: Configuration dictionary
         stage: "ticket" or "order"
         platform_name: Platform name (e.g., "TixCraft", "iBon")
+        **extra: Optional placeholder overrides (event_name, ticket_count, url, account).
     """
     adv = config_dict.get("advanced", {})
     webhook_url = adv.get("discord_webhook_url", "")
     if webhook_url:
         verbose = adv.get("verbose", False)
         custom_message = adv.get("discord_message", "")
+        context = _build_notification_context_safe(config_dict, stage, platform_name, **extra)
         util.send_discord_webhook_async(
             webhook_url, stage, platform_name,
-            verbose=verbose, custom_message=custom_message
+            verbose=verbose, custom_message=custom_message,
+            context=context
         )
 
-def send_telegram_notification(config_dict, stage, platform_name):
+def send_telegram_notification(config_dict, stage, platform_name, **extra):
     """Send Telegram bot notification if configured.
 
     Args:
         config_dict: Configuration dictionary
         stage: "ticket" or "order"
         platform_name: Platform name (e.g., "TixCraft", "iBon")
+        **extra: Optional placeholder overrides (event_name, ticket_count, url, account).
     """
     adv = config_dict.get("advanced", {})
     bot_token = adv.get("telegram_bot_token", "")
@@ -244,9 +407,11 @@ def send_telegram_notification(config_dict, stage, platform_name):
     if bot_token and chat_id:
         verbose = adv.get("verbose", False)
         custom_message = adv.get("telegram_message", "")
+        context = _build_notification_context_safe(config_dict, stage, platform_name, **extra)
         util.send_telegram_message_async(
             bot_token, chat_id, stage, platform_name,
-            verbose=verbose, custom_message=custom_message
+            verbose=verbose, custom_message=custom_message,
+            context=context
         )
     elif bot_token or chat_id:
         debug = util.create_debug_logger(config_dict)

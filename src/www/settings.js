@@ -17,6 +17,19 @@ const date_auto_fallback = document.querySelector('#date_auto_fallback');
 const area_select_mode = document.querySelector('#area_select_mode');
 const area_keyword = document.querySelector('#area_keyword');
 const area_auto_fallback = document.querySelector('#area_auto_fallback');
+const area_price_filter = document.querySelector('#area_price_filter');
+const smart_sort_priority = document.querySelector('#smart_sort_priority');
+
+// Show/hide every .smart-only row based on the selected area_select_mode.
+function _toggle_smart_rows() {
+    const show = (area_select_mode && area_select_mode.value === 'price range max remaining');
+    document.querySelectorAll('.smart-only').forEach(function(el) {
+        el.style.display = show ? '' : 'none';
+    });
+}
+if (area_select_mode) {
+    area_select_mode.addEventListener('change', _toggle_smart_rows);
+}
 const keyword_exclude = document.querySelector('#keyword_exclude');
 
 // advance
@@ -238,6 +251,9 @@ function load_settins_to_form(settings)
         area_select_mode.value = settings.area_auto_select.mode;
         area_keyword.value = format_keyword_for_display(settings.area_auto_select.area_keyword);
         area_auto_fallback.checked = settings.area_auto_fallback || false;
+        if (area_price_filter) area_price_filter.value = settings.area_auto_select.price_filter || '';
+        if (smart_sort_priority) smart_sort_priority.value = settings.area_auto_select.smart_sort_priority || 'max remaining';
+        _toggle_smart_rows();
 
         keyword_exclude.value = format_keyword_for_display(settings.keyword_exclude);
         
@@ -495,6 +511,11 @@ function save_changes_to_dict(silent_flag)
 
             settings.area_auto_select.mode = area_select_mode.value;
             settings.area_auto_select.area_keyword = format_config_keyword_for_json(area_keyword.value);
+            settings.area_auto_select.price_filter = area_price_filter ? area_price_filter.value.trim() : '';
+            settings.area_auto_select.smart_sort_priority = smart_sort_priority ? smart_sort_priority.value : 'max remaining';
+            // Drop deprecated keys so settings.json doesn't accumulate stale fields.
+            delete settings.area_auto_select.price_min;
+            delete settings.area_auto_select.price_max;
             settings.area_auto_fallback = area_auto_fallback.checked;
 
             settings.keyword_exclude = format_config_keyword_for_json(keyword_exclude.value);

@@ -14,6 +14,7 @@ import util
 from nodriver_common import (
     check_and_handle_pause,
     evaluate_with_pause_check,
+    fetch_notification_extras,
     play_sound_while_ordering,
     send_discord_notification,
     send_telegram_notification,
@@ -1808,8 +1809,9 @@ async def nodriver_ticketplus_main(tab, url, config_dict, ocr, Captcha_Browser):
 
                 if config_dict["advanced"]["play_sound"]["order"]:
                     play_sound_while_ordering(config_dict)
-                send_discord_notification(config_dict, "order", "TicketPlus")
-                send_telegram_notification(config_dict, "order", "TicketPlus")
+                extras = await fetch_notification_extras(tab, "TicketPlus")
+                send_discord_notification(config_dict, "order", "TicketPlus", **extras)
+                send_telegram_notification(config_dict, "order", "TicketPlus", **extras)
 
                 try:
                     await nodriver_ticketplus_confirm(tab, config_dict)

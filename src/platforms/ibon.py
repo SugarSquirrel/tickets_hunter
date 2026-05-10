@@ -21,6 +21,7 @@ from nodriver_common import (
     asyncio_sleep_with_pause_check,
     check_and_handle_pause,
     create_universal_ocr,
+    fetch_notification_extras,
     nodriver_check_checkbox,
     nodriver_current_url,
     nodriver_get_captcha_image_from_dom_snapshot,
@@ -4648,8 +4649,9 @@ async def nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser):
         if not _state["played_sound_order"]:
             if config_dict["advanced"]["play_sound"]["order"]:
                 play_sound_while_ordering(config_dict)
-            send_discord_notification(config_dict, "order", "iBon")
-            send_telegram_notification(config_dict, "order", "iBon")
+            extras = await fetch_notification_extras(tab, "iBon")
+            send_discord_notification(config_dict, "order", "iBon", **extras)
+            send_telegram_notification(config_dict, "order", "iBon", **extras)
         _state["played_sound_order"] = True
 
         # If headless mode, open browser to show checkout page (only once)

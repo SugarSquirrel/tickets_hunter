@@ -25,6 +25,7 @@ from zendriver import cdp
 import util
 from nodriver_common import (
     check_and_handle_pause,
+    fetch_notification_extras,
     sleep_with_pause_check,
     convert_remote_object,
     nodriver_check_checkbox,
@@ -1851,7 +1852,25 @@ async def nodriver_get_tixcraft_target_area(el, config_dict, area_keyword_item):
     debug.log(f"[AREA KEYWORD] Found {len(area_list)} area(s) to check")
     debug.log(f"[AREA KEYWORD] ========================================")
 
+    # Smart mode: parse price filter spec + sort priority up front.
+    is_smart_mode = (area_auto_select_mode == util.CONST_PRICE_RANGE_MAX_REMAINING)
+    price_ranges = []
+    smart_sort_priority = util.CONST_SMART_SORT_MAX_REMAINING
+    if is_smart_mode:
+        price_ranges = util.parse_price_filter_spec(
+            config_dict["area_auto_select"].get("price_filter", "")
+        )
+        smart_sort_priority = (
+            config_dict["area_auto_select"].get("smart_sort_priority", "")
+            or util.CONST_SMART_SORT_MAX_REMAINING
+        )
+        debug.log(f"[AREA SMART] Price filter ranges: {price_ranges}")
+        debug.log(f"[AREA SMART] Sort priority: {smart_sort_priority}")
+
     matched_blocks = []
+    # Parallel arrays only used in smart mode for sorting after the loop.
+    smart_remaining_counts = []
+    smart_prices = []
     area_index = 0
     for row in area_list:
         area_index += 1
@@ -1871,56 +1890,88 @@ async def nodriver_get_tixcraft_target_area(el, config_dict, area_keyword_item):
 
         row_text = util.format_keyword_string(row_text)
 
-        # Check keyword match
+        # Check keyword match (smart mode uses smart_area_match; legacy modes use AND-on-space substring)
         if area_keyword_item:
-            keyword_parts = area_keyword_item.split(' ')
+            if is_smart_mode:
+                # Smart mode treats whitespace as decoration, not as AND boundary.
+                # `紅 1 區` and `紅1區` mean the same thing; ; and OR is still applied
+                # by the outer caller iterating area_keyword_array.
+                is_match = util.smart_area_match(area_keyword_item, row_text)
+                debug.log(f"[AREA SMART]   smart_match('{area_keyword_item}', row) -> {is_match}")
+                if not is_match:
+                    continue
+            else:
+                keyword_parts = area_keyword_item.split(' ')
 
-            debug.log(f"[AREA KEYWORD]   Matching AND keywords: {keyword_parts}")
+                debug.log(f"[AREA KEYWORD]   Matching AND keywords: {keyword_parts}")
 
-            # Check each keyword individually for detailed feedback
-            match_results = {}
-            for kw in keyword_parts:
-                formatted_kw = util.format_keyword_string(kw)
-                kw_match = formatted_kw in row_text
-                match_results[kw] = kw_match
+                # Check each keyword individually for detailed feedback
+                match_results = {}
+                for kw in keyword_parts:
+                    formatted_kw = util.format_keyword_string(kw)
+                    kw_match = formatted_kw in row_text
+                    match_results[kw] = kw_match
+
+                    if debug.enabled:
+                        status = "PASS" if kw_match else "FAIL"
+                        debug.log(f"[AREA KEYWORD]     {status} '{kw}': {kw_match}")
+
+                is_match = all(match_results.values())
 
                 if debug.enabled:
-                    status = "PASS" if kw_match else "FAIL"
-                    debug.log(f"[AREA KEYWORD]     {status} '{kw}': {kw_match}")
+                    if is_match:
+                        debug.log(f"[AREA KEYWORD]   All AND keywords matched")
+                    else:
+                        debug.log(f"[AREA KEYWORD]   AND logic failed")
 
-            is_match = all(match_results.values())
-
-            if debug.enabled:
-                if is_match:
-                    debug.log(f"[AREA KEYWORD]   All AND keywords matched")
-                else:
-                    debug.log(f"[AREA KEYWORD]   AND logic failed")
-
-            if not is_match:
-                continue
+                if not is_match:
+                    continue
         else:
             debug.log(f"[AREA KEYWORD]   No keyword filter, accepting this area")
 
-        # Check seat availability for multiple tickets
-        if config_dict["ticket_number"] > 1:
-            try:
-                font_el = await row.query_selector('font')
-                if font_el:
-                    font_text = await font_el.evaluate('el => el.textContent')
-                    if font_text:
-                        font_text = "@%s@" % font_text
+        # Read <font> status text once (used by both legacy "1-9 seats" check and smart mode)
+        font_text = ""
+        try:
+            font_el = await row.query_selector('font')
+            if font_el:
+                font_text = await font_el.evaluate('el => el.textContent') or ""
+        except Exception:
+            pass
 
-                        debug.log(f"[AREA KEYWORD]   Checking seats: {font_text.strip('@')}")
+        if is_smart_mode:
+            remaining_count = util.parse_tixcraft_remaining_count(font_text)
+            if remaining_count <= 0:
+                debug.log(f"[AREA SMART]   Sold out (font='{font_text.strip()}'), skipping")
+                continue
+            requested = config_dict.get("ticket_number", 1) or 1
+            if remaining_count < requested:
+                debug.log(f"[AREA SMART]   Remaining {remaining_count} < requested {requested}, skipping")
+                continue
+            area_price = util.parse_price_from_area_text(row_text)
+            # Only enforce price filter if user actually set one. If price_ranges
+            # is empty -> "no limit", price unknown is OK. Otherwise we need a
+            # parseable price to verify membership.
+            if price_ranges:
+                if not util.is_price_in_filter(area_price, price_ranges):
+                    debug.log(f"[AREA SMART]   Price {area_price} outside filter {price_ranges}, skipping")
+                    continue
+            debug.log(f"[AREA SMART]   PASS price={area_price} remaining={remaining_count} font='{font_text.strip()}'")
+            matched_blocks.append(row)
+            smart_remaining_counts.append(remaining_count)
+            smart_prices.append(area_price if area_price is not None else 0)
+            # Don't break; collect all so we can sort by remaining count after the loop.
+            continue
 
-                        # Skip if only 1-9 seats remaining
-                        SEATS_1_9 = ["@%d@" % i for i in range(1, 10)]
-                        if any(seat in font_text for seat in SEATS_1_9):
-                            debug.log(f"[AREA KEYWORD]   Insufficient seats (need {config_dict['ticket_number']}, only {font_text.strip('@')} available)")
-                            continue
-                        else:
-                            debug.log(f"[AREA KEYWORD]   Sufficient seats available")
-            except:
-                pass
+        # Legacy modes: check seat availability for multiple tickets
+        if config_dict["ticket_number"] > 1 and font_text:
+            font_text_marked = "@%s@" % font_text
+            debug.log(f"[AREA KEYWORD]   Checking seats: {font_text}")
+            SEATS_1_9 = ["@%d@" % i for i in range(1, 10)]
+            if any(seat in font_text_marked for seat in SEATS_1_9):
+                debug.log(f"[AREA KEYWORD]   Insufficient seats (need {config_dict['ticket_number']}, only {font_text} available)")
+                continue
+            else:
+                debug.log(f"[AREA KEYWORD]   Sufficient seats available")
 
         matched_blocks.append(row)
 
@@ -1929,6 +1980,39 @@ async def nodriver_get_tixcraft_target_area(el, config_dict, area_keyword_item):
         if area_auto_select_mode == util.CONST_FROM_TOP_TO_BOTTOM:
             debug.log(f"[AREA KEYWORD]   Mode is '{area_auto_select_mode}', stopping at first match")
             break
+
+    # Smart mode: sort the candidate list so index 0 is the one we want first.
+    # util.get_target_index_by_mode returns 0 for our unknown mode value,
+    # so picking index 0 from the pre-sorted list gives the right element.
+    if is_smart_mode and matched_blocks:
+        # Tag each matched row with (remaining, price, original_index) for sorting.
+        bundle = list(zip(matched_blocks, smart_remaining_counts, smart_prices, range(len(matched_blocks))))
+
+        if smart_sort_priority == util.CONST_SMART_SORT_MIN_REMAINING:
+            # Smallest remaining first; ties broken by original DOM order.
+            bundle.sort(key=lambda x: (x[1], x[3]))
+            sort_label = "MIN remaining"
+        elif smart_sort_priority == util.CONST_SMART_SORT_PRICE_HIGH:
+            # Highest price first; ties broken by remaining DESC then DOM order.
+            bundle.sort(key=lambda x: (-x[2], -x[1], x[3]))
+            sort_label = "PRICE high"
+        elif smart_sort_priority == util.CONST_SMART_SORT_PRICE_LOW:
+            # Lowest price first; ties broken by remaining DESC then DOM order.
+            bundle.sort(key=lambda x: (x[2], -x[1], x[3]))
+            sort_label = "PRICE low"
+        elif smart_sort_priority == util.CONST_SMART_SORT_RANDOM:
+            import random
+            random.shuffle(bundle)
+            sort_label = "RANDOM"
+        else:
+            # Default: max remaining first; ties broken by DOM order.
+            bundle.sort(key=lambda x: (-x[1], x[3]))
+            sort_label = "MAX remaining"
+
+        matched_blocks = [r for r, _, _, _ in bundle]
+        if debug.enabled:
+            preview = ", ".join(f"(remain={r},price={p})" for _, r, p, _ in bundle[:5])
+            debug.log(f"[AREA SMART] Sorted {len(matched_blocks)} areas by {sort_label}. Top: {preview}")
 
     if not matched_blocks:
         is_need_refresh = True
@@ -3108,8 +3192,9 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
         if not _state["played_sound_order"]:
             if config_dict["advanced"]["play_sound"]["order"]:
                 play_sound_while_ordering(config_dict)
-            send_discord_notification(config_dict, "order", "TixCraft")
-            send_telegram_notification(config_dict, "order", "TixCraft")
+            extras = await fetch_notification_extras(tab, "TixCraft", config_dict.get("ticket_number"))
+            send_discord_notification(config_dict, "order", "TixCraft", **extras)
+            send_telegram_notification(config_dict, "order", "TixCraft", **extras)
         _state["played_sound_order"] = True
     else:
         _state["is_popup_checkout"] = False
@@ -3123,4 +3208,3 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
             _state["printed_completed"] = True
 
     return is_quit_bot
-

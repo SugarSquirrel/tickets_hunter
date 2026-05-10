@@ -20,6 +20,7 @@ from zendriver import cdp
 import util
 from nodriver_common import (
     check_and_handle_pause,
+    fetch_notification_extras,
     nodriver_check_checkbox,
     nodriver_get_text_by_selector,
     play_sound_while_ordering,
@@ -2123,8 +2124,9 @@ async def nodriver_kktix_main(tab, url, config_dict):
             if not _state["played_sound_order"]:
                 if config_dict["advanced"]["play_sound"]["order"]:
                     play_sound_while_ordering(config_dict)
-                send_discord_notification(config_dict, "order", "KKTIX")
-                send_telegram_notification(config_dict, "order", "KKTIX")
+                extras = await fetch_notification_extras(tab, "KKTIX", config_dict.get("ticket_number"))
+                send_discord_notification(config_dict, "order", "KKTIX", **extras)
+                send_telegram_notification(config_dict, "order", "KKTIX", **extras)
 
             _state["played_sound_order"] = True
 
@@ -2404,4 +2406,3 @@ async def nodriver_kktix_order_member_code(tab, config_dict):
     except Exception as e:
         debug.log(f"[KKTIX MEMBER CODE] Error filling member code: {str(e)}")
         return False
-

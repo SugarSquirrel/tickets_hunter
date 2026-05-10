@@ -9,6 +9,7 @@ import time
 import util
 from nodriver_common import (
     check_and_handle_pause,
+    fetch_notification_extras,
     handle_cloudflare_challenge,
     nodriver_current_url,
     play_sound_while_ordering,
@@ -667,8 +668,9 @@ async def nodriver_cityline_check_shopping_basket(tab, config_dict):
                         play_sound_while_ordering(config_dict)
                     except Exception as sound_exc:
                         debug.log(f"[CITYLINE] Sound error: {sound_exc}")
-                send_discord_notification(config_dict, "order", "Cityline")
-                send_telegram_notification(config_dict, "order", "Cityline")
+                extras = await fetch_notification_extras(tab, "Cityline")
+                send_discord_notification(config_dict, "order", "Cityline", **extras)
+                send_telegram_notification(config_dict, "order", "Cityline", **extras)
                 _state["played_sound_order"] = True
 
             # Return True to indicate we're on checkout page

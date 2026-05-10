@@ -22,6 +22,7 @@ import util
 from nodriver_common import (
     asyncio_sleep_with_pause_check,
     check_and_handle_pause,
+    fetch_notification_extras,
     nodriver_check_checkbox,
     nodriver_check_modal_dialog_popup,
     nodriver_get_captcha_image_from_dom_snapshot,
@@ -2944,8 +2945,9 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
         if not _state["played_sound_order"]:
             if config_dict["advanced"]["play_sound"]["order"]:
                 play_sound_while_ordering(config_dict)
-            send_discord_notification(config_dict, "order", "KHAM")
-            send_telegram_notification(config_dict, "order", "KHAM")
+            extras = await fetch_notification_extras(tab, "KHAM", config_dict.get("ticket_number"))
+            send_discord_notification(config_dict, "order", "KHAM", **extras)
+            send_telegram_notification(config_dict, "order", "KHAM", **extras)
         _state["played_sound_order"] = True
 
         # If headless mode, open browser to show checkout page (only once)
@@ -5803,4 +5805,3 @@ async def nodriver_ticket_switch_to_auto_seat(tab):
         pass
 
     return is_switch_to_auto_seat
-

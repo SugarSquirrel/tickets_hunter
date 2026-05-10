@@ -18,6 +18,17 @@ CONST_FROM_TOP_TO_BOTTOM = "from top to bottom"
 CONST_FROM_BOTTOM_TO_TOP = "from bottom to top"
 CONST_CENTER = "center"
 CONST_RANDOM = "random"
+# Smart mode: filter areas by price range, then pick the one with most remaining tickets.
+# Currently only implemented for the regular TixCraft flow (zone <a> elements with <font> status text).
+CONST_PRICE_RANGE_MAX_REMAINING = "price range max remaining"
+
+# Sort priorities available WITHIN smart mode (which subset of matched
+# areas to grab first). Stored under area_auto_select.smart_sort_priority.
+CONST_SMART_SORT_MAX_REMAINING = "max remaining"   # default: most tickets first
+CONST_SMART_SORT_MIN_REMAINING = "min remaining"   # snipe sections about to sell out
+CONST_SMART_SORT_PRICE_HIGH    = "price high"      # premium-first
+CONST_SMART_SORT_PRICE_LOW     = "price low"       # budget-first
+CONST_SMART_SORT_RANDOM        = "random"          # spread the load across areas
 
 # Keyword delimiter constants (Issue #23)
 CONST_KEYWORD_DELIMITER = ';'  # New delimiter (semicolon)
@@ -2205,7 +2216,301 @@ def get_token():
 # Discord Webhook Functions (specs/009-discord-webhook)
 # =============================================================================
 
-def build_discord_message(stage: str, platform_name: str, custom_message: str = None) -> dict:
+# Default keys exposed to user-defined notification templates.
+_NOTIFICATION_PLACEHOLDER_KEYS = (
+    "platform", "stage", "time", "date", "datetime",
+    "account", "event_name", "ticket_count", "url",
+)
+
+
+def build_notification_context(stage, platform_name, **overrides):
+    """Build placeholder context for custom notification messages.
+
+    Returns a dict with safe defaults for every supported key. Caller-supplied
+    overrides take precedence. Never raises — on failure returns an empty
+    context so substitution becomes a no-op.
+    """
+    try:
+        now = datetime.now()
+        ctx = {key: "" for key in _NOTIFICATION_PLACEHOLDER_KEYS}
+        ctx["platform"] = platform_name or ""
+        ctx["stage"] = stage or ""
+        ctx["time"] = now.strftime("%H:%M:%S")
+        ctx["date"] = now.strftime("%Y-%m-%d")
+        ctx["datetime"] = now.strftime("%Y-%m-%d %H:%M:%S")
+        for k, v in overrides.items():
+            if v is None:
+                continue
+            ctx[k] = str(v)
+        return ctx
+    except Exception:
+        return {key: "" for key in _NOTIFICATION_PLACEHOLDER_KEYS}
+
+
+def parse_price_input(text):
+    """Normalize a user-entered price string into an int.
+
+    Accepts the common shapes a user might type — ``"6680"``, ``"6,680"``,
+    ``"6, 680"``, ``"NT$6,680"``, ``" 6680 "`` — and returns the integer.
+    Returns ``None`` for empty input or anything with no digits at all, so
+    callers can treat None as "no limit".
+
+    Never raises.
+    """
+    try:
+        if text is None:
+            return None
+        s = str(text).strip()
+        if not s:
+            return None
+        # Strip everything that isn't a digit. This naturally drops commas,
+        # full-width commas, spaces, currency symbols, and stray decimals.
+        digits = "".join(ch for ch in s if ch.isdigit())
+        if not digits:
+            return None
+        return int(digits)
+    except Exception:
+        return None
+
+
+def parse_price_filter_spec(text):
+    """Parse a user-typed price filter into a list of (lo, hi) ranges.
+
+    Empty inputs return ``[]``, which callers should treat as "no limit".
+    Each piece is one of:
+        - ``"4480"``           -> ``(4480, 4480)`` (exact)
+        - ``"4480-6680"``      -> ``(4480, 6680)`` (range)
+        - ``"-5000"``          -> ``(None, 5000)`` (max only)
+        - ``"4480-"``          -> ``(4480, None)`` (min only)
+
+    Multiple pieces are separated by ``;`` and combined with OR semantics.
+    Numbers may include thousands separators (``"4,480"``) — they are
+    stripped by parse_price_input. Whitespace is tolerant.
+
+    Examples:
+        ""                              -> []
+        "4480"                          -> [(4480, 4480)]
+        "4,480"                         -> [(4480, 4480)]
+        "4480;6680"                     -> [(4480, 4480), (6680, 6680)]
+        "4480-6680"                     -> [(4480, 6680)]
+        "-5000;7000-9000"               -> [(None, 5000), (7000, 9000)]
+        "garbage"                       -> []  (silently dropped)
+
+    Never raises.
+    """
+    try:
+        if text is None:
+            return []
+        s = str(text).strip()
+        if not s:
+            return []
+        ranges = []
+        for piece in s.split(';'):
+            piece = piece.strip()
+            if not piece:
+                continue
+            if '-' in piece:
+                lo_str, hi_str = piece.split('-', 1)
+                lo = parse_price_input(lo_str)
+                hi = parse_price_input(hi_str)
+                # Skip if both ends are None (e.g., bare "-")
+                if lo is None and hi is None:
+                    continue
+                ranges.append((lo, hi))
+            else:
+                v = parse_price_input(piece)
+                if v is not None:
+                    ranges.append((v, v))
+        return ranges
+    except Exception:
+        return []
+
+
+def is_price_in_filter(price, ranges):
+    """True if ``price`` matches any of ``ranges``, or if ranges is empty.
+
+    Empty ``ranges`` == "no filter set" -> always True.
+    A ``None`` price (couldn't extract from row) -> False whenever ranges
+    is non-empty, since we can't verify it falls inside.
+
+    Never raises.
+    """
+    try:
+        if not ranges:
+            return True
+        if price is None:
+            return False
+        for lo, hi in ranges:
+            if lo is not None and price < lo:
+                continue
+            if hi is not None and price > hi:
+                continue
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def smart_area_match(keyword, area_text):
+    """Whitespace-tolerant area matching for the smart mode.
+
+    Differences vs plain substring matching:
+      - Whitespace (half- and full-width) is stripped from both sides before
+        comparing, so ``"紅 1 區"`` matches the same things as ``"紅1區"``.
+      - When the keyword ends with ``區``, the suffix becomes optional and
+        any letters in between are accepted, so ``"紅1區"`` matches all of
+        ``"紅1A區"``, ``"紅1B區"`` ... ``"紅1區"`` itself, but NOT ``"紅12A區"``.
+      - When the keyword's last meaningful char is a digit, a non-digit
+        boundary is enforced after it, so ``"紅1"`` won't match ``"紅12"``.
+
+    Returns ``False`` for empty keyword/text. Never raises.
+    """
+    try:
+        import re
+        if not keyword or not area_text:
+            return False
+
+        def norm(s):
+            # Strip all ASCII whitespace plus full-width space (U+3000)
+            return ''.join(ch for ch in str(s) if not ch.isspace() and ch != '　')
+
+        kw = norm(keyword)
+        area = norm(area_text)
+        if not kw or not area:
+            return False
+
+        # Case 1: keyword ends with 區 -> allow letters between digit prefix and 區
+        if kw.endswith('區') and len(kw) > 1:
+            prefix = kw[:-1]
+            if not prefix:
+                return '區' in area
+            if prefix[-1].isdigit():
+                # Forbid extra digits right after the prefix (no 紅1 -> 紅12)
+                pattern = re.escape(prefix) + r'(?!\d)[A-Za-z]*區'
+            else:
+                pattern = re.escape(prefix) + r'[A-Za-z]*區'
+            return bool(re.search(pattern, area))
+
+        # Case 2: keyword ends in digit -> substring + non-digit boundary
+        if kw[-1].isdigit():
+            pattern = re.escape(kw) + r'(?!\d)'
+            return bool(re.search(pattern, area))
+
+        # Case 3: ordinary substring match
+        return kw in area
+    except Exception:
+        return False
+
+
+def parse_tixcraft_remaining_count(font_text):
+    """Parse the per-area status text shown in TixCraft <font> element.
+
+    TixCraft surfaces three states:
+      - "熱賣中"  -> treat as a large number (>= 100). We return 999 so it
+                     wins ties against any "剩餘 N" (which is 1-99).
+      - "剩餘 N" -> the integer N (1-99).
+      - "已售完" / blank -> 0.
+
+    Never raises — returns 0 on any failure so the caller treats it as sold out.
+    """
+    try:
+        if not font_text:
+            return 0
+        text = str(font_text).strip()
+        if not text:
+            return 0
+        if "已售完" in text or "Sold" in text or "sold out" in text.lower():
+            return 0
+        if "熱賣" in text or "熱賣中" in text or "hot" in text.lower():
+            return 999
+        # Try to extract a number from "剩餘 25" / "剩餘25" / "Remaining 25"
+        import re
+        match = re.search(r"\d+", text)
+        if match:
+            return int(match.group(0))
+        return 0
+    except Exception:
+        return 0
+
+
+def parse_price_from_area_text(row_text):
+    """Best-effort extraction of an area's ticket price from its row text.
+
+    TixCraft area rows usually look like ``"A1區6880 已售完"`` or
+    ``"搖滾區 NT$4,800"``. We strip thousand separators and grab the largest
+    integer in the row — since prices are always larger than seat numbers
+    (which are 1-9 when shown), this heuristic is robust.
+
+    Returns ``None`` when no price-looking number is found, so callers can
+    distinguish "no data" from "price is zero".
+    Never raises.
+    """
+    try:
+        if not row_text:
+            return None
+        text = str(row_text)
+        # Strip thousand separators so "4,800" becomes "4800"
+        text = text.replace(",", "").replace("，", "")
+        import re
+        numbers = re.findall(r"\d+", text)
+        if not numbers:
+            return None
+        # Filter out small numbers (likely seat counts shown as "剩餘 5")
+        candidates = [int(n) for n in numbers if int(n) >= 100]
+        if not candidates:
+            return None
+        return max(candidates)
+    except Exception:
+        return None
+
+
+def clean_title_for_event_name(title, platform_name=""):
+    """Heuristically extract event name from a browser tab title.
+
+    Most ticketing sites format their title as "<event name> | <site>" or
+    "<event name> - <site>" (or vice versa). We split on common separators
+    and pick the longest segment, which is almost always the event name
+    rather than the site brand.
+
+    Never raises — returns "" on failure.
+    """
+    try:
+        if not title:
+            return ""
+        text = str(title).strip()
+        if not text:
+            return ""
+        for sep in (" | ", " - ", " — ", " :: ", " / "):
+            if sep in text:
+                parts = [p.strip() for p in text.split(sep) if p.strip()]
+                if parts:
+                    text = max(parts, key=len)
+                    break
+        return text
+    except Exception:
+        return ""
+
+
+def apply_notification_placeholders(template, context):
+    """Substitute {key} placeholders in template using context dict.
+
+    Never raises — on failure the original template is returned unchanged so
+    notifications still get sent.
+    """
+    if not template:
+        return template
+    if not context:
+        return template
+    try:
+        result = template
+        for key, value in context.items():
+            result = result.replace("{" + key + "}", "" if value is None else str(value))
+        return result
+    except Exception:
+        return template
+
+
+def build_discord_message(stage: str, platform_name: str, custom_message: str = None, context: dict = None) -> dict:
     """
     Build Discord webhook message payload based on stage and platform.
 
@@ -2213,12 +2518,14 @@ def build_discord_message(stage: str, platform_name: str, custom_message: str = 
         stage: Notification stage ("ticket" or "order")
         platform_name: Platform name (e.g., "TixCraft", "iBon")
         custom_message: User-defined message text; if non-empty, overrides default.
+        context: Optional placeholder context dict from build_notification_context().
 
     Returns:
         dict: Discord Webhook payload with content and username
     """
     if custom_message:
-        return {"content": custom_message, "username": "Tickets Hunter"}
+        rendered = apply_notification_placeholders(custom_message, context) if context else custom_message
+        return {"content": rendered, "username": "Tickets Hunter"}
 
     if not platform_name:
         platform_name = "Unknown"
@@ -2242,7 +2549,8 @@ def send_discord_webhook(
     platform_name: str,
     timeout: float = 3.0,
     verbose: bool = False,
-    custom_message: str = None
+    custom_message: str = None,
+    context: dict = None
 ) -> bool:
     """
     Send Discord Webhook notification (synchronous).
@@ -2267,7 +2575,7 @@ def send_discord_webhook(
 
     debug = DebugLogger(enabled=verbose)
     try:
-        payload = build_discord_message(stage, platform_name, custom_message=custom_message)
+        payload = build_discord_message(stage, platform_name, custom_message=custom_message, context=context)
         response = requests.post(
             webhook_url,
             json=payload,
@@ -2287,7 +2595,8 @@ def send_discord_webhook_async(
     platform_name: str,
     timeout: float = 3.0,
     verbose: bool = False,
-    custom_message: str = None
+    custom_message: str = None,
+    context: dict = None
 ) -> None:
     """
     Send Discord Webhook notification asynchronously.
@@ -2310,13 +2619,13 @@ def send_discord_webhook_async(
     thread = threading.Thread(
         target=send_discord_webhook,
         args=(webhook_url, stage, platform_name),
-        kwargs={"timeout": timeout, "verbose": verbose, "custom_message": custom_message},
+        kwargs={"timeout": timeout, "verbose": verbose, "custom_message": custom_message, "context": context},
         daemon=True
     )
     thread.start()
 
 
-def build_telegram_message(stage: str, platform_name: str, custom_message: str = None) -> str:
+def build_telegram_message(stage: str, platform_name: str, custom_message: str = None, context: dict = None) -> str:
     """
     Build Telegram notification message text based on stage and platform.
 
@@ -2324,12 +2633,13 @@ def build_telegram_message(stage: str, platform_name: str, custom_message: str =
         stage: Notification stage ("ticket" or "order")
         platform_name: Platform name (e.g., "TixCraft", "iBon")
         custom_message: User-defined message text; if non-empty, overrides default.
+        context: Optional placeholder context dict from build_notification_context().
 
     Returns:
         str: Message text
     """
     if custom_message:
-        return custom_message
+        return apply_notification_placeholders(custom_message, context) if context else custom_message
 
     if not platform_name:
         platform_name = "Unknown"
@@ -2351,7 +2661,8 @@ def send_telegram_message(
     platform_name: str,
     timeout: float = 3.0,
     verbose: bool = False,
-    custom_message: str = None
+    custom_message: str = None,
+    context: dict = None
 ) -> bool:
     """
     Send Telegram Bot notification (synchronous).
@@ -2375,7 +2686,7 @@ def send_telegram_message(
     if not chat_ids:
         return False
 
-    text = build_telegram_message(stage, platform_name, custom_message=custom_message)
+    text = build_telegram_message(stage, platform_name, custom_message=custom_message, context=context)
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     debug = DebugLogger(enabled=verbose)
     any_success = False
@@ -2402,7 +2713,8 @@ def send_telegram_message_async(
     platform_name: str,
     timeout: float = 3.0,
     verbose: bool = False,
-    custom_message: str = None
+    custom_message: str = None,
+    context: dict = None
 ) -> None:
     """
     Send Telegram Bot notification asynchronously.
@@ -2424,7 +2736,7 @@ def send_telegram_message_async(
     thread = threading.Thread(
         target=send_telegram_message,
         args=(bot_token, chat_id, stage, platform_name),
-        kwargs={"timeout": timeout, "verbose": verbose, "custom_message": custom_message},
+        kwargs={"timeout": timeout, "verbose": verbose, "custom_message": custom_message, "context": context},
         daemon=True
     )
     thread.start()
