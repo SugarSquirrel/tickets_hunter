@@ -1,0 +1,65 @@
+# IDE files
+/.vscode
+/.idea
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.python-version
+
+# Sensitive config files
+/src/settings.json
+/src/MAXBOT_LAST_URL.txt
+/src/MAXBOT_INT28_IDLE.txt
+/src/MAXBOT_QUESTION.txt
+src/webdriver/*/data/settings.json
+src/webdriver/*/data/status.json
+
+# Browser data
+chrome_profile/
+user_data/
+
+# WebDriver executables
+/src/webdriver/*.exe
+/src/webdriver/chromedriver*
+/src/webdriver/geckodriver*
+/src/webdriver/msedgedriver*
+
+# Chrome for Testing (auto-downloaded)
+/src/webdriver/chrome-win64/
+/src/webdriver/chrome-linux64/
+/src/webdriver/chrome-mac-*/
+
+# Logs and temp files
+*.log
+*.tmp
+.temp/
+.history/
+logs.txt
+
+# Environment files
+.env
+.env.*
+
+# Private documentation (Claude Code)
+.claude/
+CLAUDE.md
+/docs/
+.specify/
+specs/
+.mcp.json
+
+tmpclaude-*-cwd
+
+# Captcha trainer tool (private - code tracked via gsave PRIVATE commit)
+# Defense in depth: large data directories excluded even without nested .gitignore
+tools/captcha_trainer/OCRimages/
+tools/captcha_trainer/projects/
+tools/captcha_trainer/temp/
+tools/captcha_trainer/.venv/
+tools/captcha_trainer/build/
+tools/captcha_trainer/dist/
+.spectra/
+openspec/.vector-search.db*
