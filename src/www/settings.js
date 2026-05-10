@@ -20,11 +20,16 @@ const area_auto_fallback = document.querySelector('#area_auto_fallback');
 const area_price_filter = document.querySelector('#area_price_filter');
 const smart_sort_priority = document.querySelector('#smart_sort_priority');
 
-// Show/hide every .smart-only row based on the selected area_select_mode.
+// Toggle visibility based on whether the user is in smart mode.
+//   .smart-only         -> visible ONLY in smart mode
+//   .legacy-mode-only   -> visible ONLY in the other (top/bottom/center/random) modes
 function _toggle_smart_rows() {
     const show = (area_select_mode && area_select_mode.value === 'price range max remaining');
     document.querySelectorAll('.smart-only').forEach(function(el) {
         el.style.display = show ? '' : 'none';
+    });
+    document.querySelectorAll('.legacy-mode-only').forEach(function(el) {
+        el.style.display = show ? 'none' : '';
     });
 }
 if (area_select_mode) {
