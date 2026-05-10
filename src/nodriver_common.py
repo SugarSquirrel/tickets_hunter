@@ -972,8 +972,45 @@ async def handle_cloudflare_challenge(tab, config_dict, max_retry=None):
 
 # ===== Pause Mechanism =====
 
+# Module-level "grabbing in progress" flag. When True, every pause check below
+# returns False even if the IDLE file exists, so the seconds-keyword pause
+# schedule cannot interrupt the bot once it has actually started clicking on
+# a real ticket. Set this to True the moment a target area is successfully
+# selected; reset it back to False at the top of each new area-search retry
+# so the pause schedule resumes governing the idle reload loop.
+_grabbing_critical = False
+
+
+def set_grabbing_critical(value):
+    """Toggle the grabbing-critical override on the pause mechanism.
+
+    Pass True after a successful area click (so the rest of the checkout
+    flow won't be interrupted by a seconds-keyword pause), and False when
+    re-entering the area-search retry loop (so pause governs idle waits
+    again). Never raises.
+    """
+    global _grabbing_critical
+    try:
+        _grabbing_critical = bool(value)
+    except Exception:
+        _grabbing_critical = False
+
+
+def is_grabbing_critical():
+    """Return the current state of the grabbing-critical override."""
+    return _grabbing_critical
+
+
 async def check_and_handle_pause(config_dict=None):
-    """check pause file and handle pause state"""
+    """check pause file and handle pause state.
+
+    Honours the grabbing-critical override: while a grab is in flight,
+    we never report 'paused' even if the IDLE file exists, because the
+    user has explicitly chosen to prefer 'finish the grab' over 'respect
+    the pause schedule'.
+    """
+    if _grabbing_critical:
+        return False
     if os.path.exists(CONST_MAXBOT_INT28_FILE):
         return True
     return False

@@ -26,6 +26,7 @@ import util
 from nodriver_common import (
     check_and_handle_pause,
     fetch_notification_extras,
+    set_grabbing_critical,
     sleep_with_pause_check,
     convert_remote_object,
     nodriver_check_checkbox,
@@ -1696,6 +1697,11 @@ async def nodriver_tixcraft_date_auto_select(tab, url, config_dict, domain_name)
     return is_date_clicked
 
 async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
+    # Each entry into the area-search loop is a fresh attempt — drop any
+    # leftover "we're in the middle of a grab" lock so the seconds-keyword
+    # pause schedule governs idle reloads normally. The flag will be re-set
+    # below if we successfully click on a real target area.
+    set_grabbing_critical(False)
     # 函數開始時檢查暫停
     if await check_and_handle_pause(config_dict):
         return False
@@ -1794,6 +1800,13 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
                 debug.log(f"[AREA SELECT] Selected area: {area_text} ({selection_type})")
             except:
                 pass  # If text extraction fails, skip logging
+
+        # We're about to click into a real target — lock pause for the rest
+        # of the checkout flow so the seconds-keyword schedule won't strand
+        # the bot mid-grab. The flag is reset automatically the next time we
+        # re-enter this function (i.e. when the grab fails and we retry).
+        set_grabbing_critical(True)
+        debug.log(f"[AREA SELECT] Pause schedule locked: grabbing critical path engaged")
 
         try:
             await target_area.click()
