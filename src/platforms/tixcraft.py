@@ -1873,17 +1873,29 @@ async def nodriver_get_tixcraft_target_area(el, config_dict, area_keyword_item):
     # for EVERY area at once. This used to be N DOM round-trips (one
     # get_html + one font query per row), which dominated the scan time.
     # Now scan time scales as O(1) DOM calls + O(N) Python work.
+    #
+    # Implementation note: zendriver's evaluate() is unreliable when the
+    # JS returns a native Array (got 'NoneType' object is not callable
+    # when the wrapper tried to convert it). Returning a JSON STRING and
+    # parsing it Python-side is the safest contract — strings always
+    # round-trip cleanly through the CDP layer.
     # ===================================================================
     batch_data = None
     try:
-        batch_data = await el.evaluate('''
-            el => Array.from(el.querySelectorAll("a")).map(a => {
-                const font = a.querySelector("font");
-                return [a.textContent || "", font ? (font.textContent || "") : ""];
-            })
+        batch_json = await el.evaluate('''
+            el => JSON.stringify(
+                Array.from(el.querySelectorAll("a")).map(function(a) {
+                    var font = a.querySelector("font");
+                    return [a.textContent || "", font ? (font.textContent || "") : ""];
+                })
+            )
         ''')
+        if batch_json:
+            import json as _json
+            batch_data = _json.loads(batch_json)
     except Exception as exc:
         debug.log(f"[AREA KEYWORD] Batch evaluate failed, will fall back per-row: {exc}")
+        batch_data = None
 
     try:
         area_list = await el.query_selector_all('a')
