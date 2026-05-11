@@ -22,6 +22,7 @@ from nodriver_common import (
     check_and_handle_pause,
     create_universal_ocr,
     fetch_notification_extras,
+    is_grabbing_critical,
     nodriver_check_checkbox,
     nodriver_current_url,
     nodriver_get_captcha_image_from_dom_snapshot,
@@ -3654,8 +3655,11 @@ async def nodriver_ibon_main(tab, url, config_dict, ocr, Captcha_Browser):
 
     # Global alert handler - auto-dismiss iBon alerts (sold-out, errors, etc.)
     async def handle_ibon_alert(event):
-        # Skip alert handling when bot is paused (let user handle manually)
-        if os.path.exists(CONST_MAXBOT_INT28_FILE):
+        # Skip alert handling when bot is paused (let user handle manually).
+        # Defensive: when smart-mode adds set_grabbing_critical() coverage to
+        # this platform, the override below ensures alerts are still dismissed
+        # mid-grab so a stranded dialog doesn't lock the bot up.
+        if os.path.exists(CONST_MAXBOT_INT28_FILE) and not is_grabbing_critical():
             return
 
         # Skip checkout page - let user handle important alerts manually

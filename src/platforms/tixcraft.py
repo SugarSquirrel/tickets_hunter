@@ -26,6 +26,7 @@ import util
 from nodriver_common import (
     check_and_handle_pause,
     fetch_notification_extras,
+    is_grabbing_critical,
     set_grabbing_critical,
     sleep_with_pause_check,
     convert_remote_object,
@@ -2978,8 +2979,13 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
     # Handles alerts that appear after page navigation (e.g., area selection redirects)
     # Reference: KHAM platform implementation (Line 10681-10697)
     async def handle_global_alert(event):
-        # Skip alert handling when bot is paused (let user handle manually)
-        if os.path.exists(CONST_MAXBOT_INT28_FILE):
+        # Skip alert handling when bot is paused (let user handle manually).
+        # IMPORTANT: When the grab is in flight (is_grabbing_critical) we
+        # MUST still dismiss the alert — otherwise a sold-out alert that
+        # arrives during a pause-keyword window leaves the dialog stranded
+        # on the page, which blocks all JS and locks the bot up until the
+        # user manually clicks OK.
+        if os.path.exists(CONST_MAXBOT_INT28_FILE) and not is_grabbing_critical():
             return
         # IMPORTANT: Use tab.target.url (cached) instead of nodriver_current_url (js_dumps)
         # When alert dialog is open, JavaScript execution is blocked, causing js_dumps to hang

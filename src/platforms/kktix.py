@@ -21,6 +21,7 @@ import util
 from nodriver_common import (
     check_and_handle_pause,
     fetch_notification_extras,
+    is_grabbing_critical,
     nodriver_check_checkbox,
     nodriver_get_text_by_selector,
     play_sound_while_ordering,
@@ -1876,8 +1877,11 @@ async def nodriver_kktix_main(tab, url, config_dict):
 
     # Global alert handler - auto-dismiss KKTIX sold-out alerts
     async def handle_kktix_alert(event):
-        # Skip alert handling when bot is paused (let user handle manually)
-        if os.path.exists(CONST_MAXBOT_INT28_FILE):
+        # Skip alert handling when bot is paused (let user handle manually).
+        # Defensive: when smart-mode adds set_grabbing_critical() coverage to
+        # this platform, the override below ensures alerts are still dismissed
+        # mid-grab so a stranded dialog doesn't lock the bot up.
+        if os.path.exists(CONST_MAXBOT_INT28_FILE) and not is_grabbing_critical():
             return
 
         debug.log(f"[KKTIX ALERT] Alert detected: '{event.message}'")
