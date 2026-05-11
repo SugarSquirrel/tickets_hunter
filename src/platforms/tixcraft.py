@@ -1852,19 +1852,6 @@ async def nodriver_get_tixcraft_target_area(el, config_dict, area_keyword_item):
         debug.log(f"[AREA KEYWORD] Element is None, cannot select area")
         return True, None
 
-    try:
-        area_list = await el.query_selector_all('a')
-    except:
-        debug.log(f"[AREA KEYWORD] Failed to query area list")
-        return True, None
-
-    if not area_list or len(area_list) == 0:
-        debug.log(f"[AREA KEYWORD] No areas found")
-        return True, None
-
-    debug.log(f"[AREA KEYWORD] Found {len(area_list)} area(s) to check")
-    debug.log(f"[AREA KEYWORD] ========================================")
-
     # Smart mode: parse price filter spec + sort priority up front.
     is_smart_mode = (area_auto_select_mode == util.CONST_PRICE_RANGE_MAX_REMAINING)
     price_ranges = []
@@ -1880,20 +1867,71 @@ async def nodriver_get_tixcraft_target_area(el, config_dict, area_keyword_item):
         debug.log(f"[AREA SMART] Price filter ranges: {price_ranges}")
         debug.log(f"[AREA SMART] Sort priority: {smart_sort_priority}")
 
+    # ===================================================================
+    # FAST PATH: a single round-trip to the page that returns text + font
+    # for EVERY area at once. This used to be N DOM round-trips (one
+    # get_html + one font query per row), which dominated the scan time.
+    # Now scan time scales as O(1) DOM calls + O(N) Python work.
+    # ===================================================================
+    batch_data = None
+    try:
+        batch_data = await el.evaluate('''
+            el => Array.from(el.querySelectorAll("a")).map(a => {
+                const font = a.querySelector("font");
+                return [a.textContent || "", font ? (font.textContent || "") : ""];
+            })
+        ''')
+    except Exception as exc:
+        debug.log(f"[AREA KEYWORD] Batch evaluate failed, will fall back per-row: {exc}")
+
+    try:
+        area_list = await el.query_selector_all('a')
+    except:
+        debug.log(f"[AREA KEYWORD] Failed to query area list")
+        return True, None
+
+    if not area_list or len(area_list) == 0:
+        debug.log(f"[AREA KEYWORD] No areas found")
+        return True, None
+
+    # If batch returned a different count than the live element list (DOM
+    # mutated between the two calls), fall back to per-row reads to stay
+    # correct rather than risk a misalignment.
+    use_batch = (
+        isinstance(batch_data, list)
+        and len(batch_data) == len(area_list)
+    )
+
+    debug.log(f"[AREA KEYWORD] Found {len(area_list)} area(s) to check"
+              + (" (batched)" if use_batch else " (per-row fallback)"))
+    debug.log(f"[AREA KEYWORD] ========================================")
+
     matched_blocks = []
     # Parallel arrays only used in smart mode for sorting after the loop.
     smart_remaining_counts = []
     smart_prices = []
-    area_index = 0
-    for row in area_list:
-        area_index += 1
 
-        try:
-            row_html = await row.get_html()
-            row_text = util.remove_html_tags(row_html)
-        except:
-            debug.log(f"[AREA KEYWORD] [{area_index}] Failed to get row content")
-            break
+    for area_index, row in enumerate(area_list, start=1):
+        # Resolve row_text + font_text without any extra async DOM call when
+        # the batch succeeded.
+        font_text = ""
+        if use_batch:
+            try:
+                pair = batch_data[area_index - 1]
+                if isinstance(pair, (list, tuple)) and len(pair) >= 2:
+                    row_text = str(pair[0] or "")
+                    font_text = str(pair[1] or "")
+                else:
+                    row_text = str(pair) if pair else ""
+            except Exception:
+                row_text = ""
+        else:
+            try:
+                row_html = await row.get_html()
+                row_text = util.remove_html_tags(row_html)
+            except:
+                debug.log(f"[AREA KEYWORD] [{area_index}] Failed to get row content")
+                break
 
         if not row_text or util.reset_row_text_if_match_keyword_exclude(config_dict, row_text):
             debug.log(f"[AREA KEYWORD] [{area_index}] Excluded by keyword_exclude")
@@ -1942,16 +1980,15 @@ async def nodriver_get_tixcraft_target_area(el, config_dict, area_keyword_item):
         else:
             debug.log(f"[AREA KEYWORD]   No keyword filter, accepting this area")
 
-        # Status text (剩餘 N / 熱賣中 / 已售完) is sometimes inline in the row
-        # text (newer events) and sometimes wrapped in a <font> child (older
-        # markup). Prefer row_text — it's already in memory, so we save a
-        # DOM round-trip per area when the inline form is used (huge perf win
-        # on events with many sections).
+        # Status text (剩餘 N / 熱賣中 / 已售完) lives either inline in the row
+        # text (newer events) or wrapped in a <font> child (older markup).
+        # When using the batch path we already have both fields in hand;
+        # when falling back per-row, only fetch <font> if row_text doesn't
+        # already contain the status keyword (saves a DOM call per row).
         STATUS_MARKERS = ("剩餘", "Remaining", "熱賣", "已售完", "Sold")
         row_has_status = any(k in row_text for k in STATUS_MARKERS)
-        font_text = ""
-        if not row_has_status:
-            # No inline status -> need to look at <font> child for the count.
+        if not use_batch and not row_has_status:
+            # Per-row fallback only: fetch <font> on demand.
             try:
                 font_el = await row.query_selector('font')
                 if font_el:
