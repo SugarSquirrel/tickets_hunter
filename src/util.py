@@ -2402,32 +2402,51 @@ def smart_area_match(keyword, area_text):
         return False
 
 
-def parse_tixcraft_remaining_count(font_text):
-    """Parse the per-area status text shown in TixCraft <font> element.
+def parse_tixcraft_remaining_count(text):
+    """Parse the per-area remaining-count signal shown by TixCraft.
 
-    TixCraft surfaces three states:
-      - "熱賣中"  -> treat as a large number (>= 100). We return 999 so it
-                     wins ties against any "剩餘 N" (which is 1-99).
-      - "剩餘 N" -> the integer N (1-99).
-      - "已售完" / blank -> 0.
+    Accepts EITHER the contents of a dedicated ``<font>`` status element
+    (e.g. ``"剩餘 25"``) OR the full row text (e.g.
+    ``"&nbsp;A1區6880 剩餘 1"``) — we look for the count specifically
+    after a ``剩餘`` / ``Remaining`` marker so the area number and price
+    digits in the row don't get mistaken for the count.
+
+    States surfaced:
+      - ``"熱賣中"`` / ``"hot"``      -> 999 (treated as plenty)
+      - ``"剩餘 N"`` / ``"Remaining N"`` -> N
+      - ``"已售完"`` / ``"Sold out"``  -> 0
+      - bare numeric (``"25"``)       -> 25 (legacy <font>-only events)
+      - anything else / empty         -> 0
 
     Never raises — returns 0 on any failure so the caller treats it as sold out.
     """
     try:
-        if not font_text:
-            return 0
-        text = str(font_text).strip()
         if not text:
             return 0
-        if "已售完" in text or "Sold" in text or "sold out" in text.lower():
+        s = str(text).strip()
+        if not s:
             return 0
-        if "熱賣" in text or "熱賣中" in text or "hot" in text.lower():
+        s_lower = s.lower()
+        # Definitive sold-out markers come first so a stray digit elsewhere
+        # in the string can't override them.
+        if "已售完" in s or "Sold" in s or "sold out" in s_lower:
+            return 0
+        # "Hot" / "熱賣" is unbounded, treat as max so it beats any "剩餘 N".
+        if "熱賣" in s or "hot" in s_lower:
             return 999
-        # Try to extract a number from "剩餘 25" / "剩餘25" / "Remaining 25"
         import re
-        match = re.search(r"\d+", text)
-        if match:
-            return int(match.group(0))
+        # Look for the count specifically after a Chinese / English marker —
+        # this is the critical fix vs. the previous "first digit anywhere"
+        # behaviour that mis-read area numbers and prices as remaining count.
+        m = re.search(r"剩餘\s*(\d+)", s)
+        if m:
+            return int(m.group(1))
+        m = re.search(r"Remaining\s*(\d+)", s, re.IGNORECASE)
+        if m:
+            return int(m.group(1))
+        # Legacy fallback: <font> elements that contain JUST a number.
+        if s.isdigit():
+            return int(s)
         return 0
     except Exception:
         return 0
@@ -2436,26 +2455,36 @@ def parse_tixcraft_remaining_count(font_text):
 def parse_price_from_area_text(row_text):
     """Best-effort extraction of an area's ticket price from its row text.
 
-    TixCraft area rows usually look like ``"A1區6880 已售完"`` or
-    ``"搖滾區 NT$4,800"``. We strip thousand separators and grab the largest
-    integer in the row — since prices are always larger than seat numbers
-    (which are 1-9 when shown), this heuristic is robust.
+    TixCraft area rows commonly look like:
+      ``"A1區6880 已售完"``        — price + status
+      ``"搖滾區 NT$4,800"``         — price + currency
+      ``"A1區6880 剩餘 1"``         — price + count (count must NOT win)
+      ``"紅219區6280 剩餘 6"``      — area number + price + count
 
-    Returns ``None`` when no price-looking number is found, so callers can
-    distinguish "no data" from "price is zero".
+    Strategy: strip the status portion (``剩餘 N`` / ``Remaining N`` /
+    ``熱賣中`` / ``已售完``) first so its digits can't be confused with the
+    price, drop thousand separators, then take the largest remaining number
+    that looks like a real price (>= 100). Returns ``None`` if no plausible
+    price is found.
+
     Never raises.
     """
     try:
         if not row_text:
             return None
-        text = str(row_text)
-        # Strip thousand separators so "4,800" becomes "4800"
-        text = text.replace(",", "").replace("，", "")
         import re
+        text = str(row_text).replace(",", "").replace("，", "")
+        # Strip the count and status fragments so their digits don't
+        # contaminate the price extraction.
+        text = re.sub(r"剩餘\s*\d+", "", text)
+        text = re.sub(r"Remaining\s*\d+", "", text, flags=re.IGNORECASE)
+        text = text.replace("熱賣中", "").replace("熱賣", "").replace("已售完", "")
         numbers = re.findall(r"\d+", text)
         if not numbers:
             return None
-        # Filter out small numbers (likely seat counts shown as "剩餘 5")
+        # Prices are typically the largest 4-digit-ish number in the row;
+        # area numbers (e.g. "219", "509") are usually 3 digits but smaller
+        # than the price. Taking max handles both "區號 + 價" and "純價" cases.
         candidates = [int(n) for n in numbers if int(n) >= 100]
         if not candidates:
             return None

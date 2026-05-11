@@ -1942,19 +1942,28 @@ async def nodriver_get_tixcraft_target_area(el, config_dict, area_keyword_item):
         else:
             debug.log(f"[AREA KEYWORD]   No keyword filter, accepting this area")
 
-        # Read <font> status text once (used by both legacy "1-9 seats" check and smart mode)
+        # Status text (剩餘 N / 熱賣中 / 已售完) is sometimes inline in the row
+        # text (newer events) and sometimes wrapped in a <font> child (older
+        # markup). Prefer row_text — it's already in memory, so we save a
+        # DOM round-trip per area when the inline form is used (huge perf win
+        # on events with many sections).
+        STATUS_MARKERS = ("剩餘", "Remaining", "熱賣", "已售完", "Sold")
+        row_has_status = any(k in row_text for k in STATUS_MARKERS)
         font_text = ""
-        try:
-            font_el = await row.query_selector('font')
-            if font_el:
-                font_text = await font_el.evaluate('el => el.textContent') or ""
-        except Exception:
-            pass
+        if not row_has_status:
+            # No inline status -> need to look at <font> child for the count.
+            try:
+                font_el = await row.query_selector('font')
+                if font_el:
+                    font_text = await font_el.evaluate('el => el.textContent') or ""
+            except Exception:
+                pass
+        status_text = row_text if row_has_status else font_text
 
         if is_smart_mode:
-            remaining_count = util.parse_tixcraft_remaining_count(font_text)
+            remaining_count = util.parse_tixcraft_remaining_count(status_text)
             if remaining_count <= 0:
-                debug.log(f"[AREA SMART]   Sold out (font='{font_text.strip()}'), skipping")
+                debug.log(f"[AREA SMART]   Sold out (status='{status_text.strip()[:40]}'), skipping")
                 continue
             requested = config_dict.get("ticket_number", 1) or 1
             if remaining_count < requested:
