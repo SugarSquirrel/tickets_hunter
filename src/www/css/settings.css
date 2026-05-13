@@ -252,6 +252,7 @@ textarea {
 .highlight-field:focus {
     background-color: #e7f1ff !important;
     border: 2px solid #0d6efd !important;
+    color: #1a1a1a !important;            /* explicit dark text so digits never disappear */
     box-shadow: 0 0 0 0.15rem rgba(13, 110, 253, 0.15) !important;
 }
 [data-bs-theme="dark"] .highlight-field,
@@ -263,5 +264,10 @@ textarea {
 }
 [data-bs-theme="dark"] .highlight-field::placeholder {
     color: rgba(231, 241, 255, 0.55) !important;
+}
+/* Tidy the native spin buttons inside .highlight-field number inputs so they
+   match the dark theme and don't crowd the digit out of view. */
+[data-bs-theme="dark"] .highlight-field[type="number"] {
+    color-scheme: dark;
 }
 
