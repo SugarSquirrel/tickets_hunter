@@ -1863,10 +1863,24 @@ async def nodriver_get_tixcraft_target_area(el, config_dict, area_keyword_item):
         )
         smart_sort_priority = (
             config_dict["area_auto_select"].get("smart_sort_priority", "")
-            or util.CONST_SMART_SORT_MAX_REMAINING
+            or util.CONST_SMART_SORT_REMAINING_RANK
         )
+        # Parameters for the "remaining rank" mode (ignored otherwise).
+        rank_direction = str(
+            config_dict["area_auto_select"].get("smart_sort_rank_direction", "high")
+        ).lower().strip()
+        if rank_direction not in ("high", "low"):
+            rank_direction = "high"
+        try:
+            rank_n = int(config_dict["area_auto_select"].get("smart_sort_rank_n", 1))
+        except Exception:
+            rank_n = 1
+        if rank_n < 1:
+            rank_n = 1
         debug.log(f"[AREA SMART] Price filter ranges: {price_ranges}")
         debug.log(f"[AREA SMART] Sort priority: {smart_sort_priority}")
+        if smart_sort_priority == util.CONST_SMART_SORT_REMAINING_RANK:
+            debug.log(f"[AREA SMART] Rank: direction={rank_direction}, n={rank_n}")
 
     # ===================================================================
     # FAST PATH: a single round-trip to the page that returns text + font
@@ -2060,10 +2074,29 @@ async def nodriver_get_tixcraft_target_area(el, config_dict, area_keyword_item):
         # Tag each matched row with (remaining, price, original_index) for sorting.
         bundle = list(zip(matched_blocks, smart_remaining_counts, smart_prices, range(len(matched_blocks))))
 
-        if smart_sort_priority == util.CONST_SMART_SORT_MIN_REMAINING:
-            # Smallest remaining first; ties broken by original DOM order.
-            bundle.sort(key=lambda x: (x[1], x[3]))
-            sort_label = "MIN remaining"
+        rank_shift = 0   # how many leading elements to drop after sorting
+        legacy_min = (smart_sort_priority == util.CONST_SMART_SORT_MIN_REMAINING_LEGACY)
+        legacy_max = (smart_sort_priority == util.CONST_SMART_SORT_MAX_REMAINING_LEGACY)
+
+        if smart_sort_priority == util.CONST_SMART_SORT_REMAINING_RANK or legacy_min or legacy_max:
+            # Decide direction. Legacy "max remaining" -> high, "min remaining" -> low.
+            effective_direction = rank_direction
+            if legacy_min:
+                effective_direction = "low"
+            elif legacy_max:
+                effective_direction = "high"
+            if effective_direction == "low":
+                # Smallest remaining first; ties broken by original DOM order.
+                bundle.sort(key=lambda x: (x[1], x[3]))
+                sort_label = f"REMAINING rank LOW #{rank_n}"
+            else:
+                # Largest remaining first; ties broken by DOM order.
+                bundle.sort(key=lambda x: (-x[1], x[3]))
+                sort_label = f"REMAINING rank HIGH #{rank_n}"
+            # Convert 1-indexed rank to a "drop this many from the front" shift,
+            # clamped so we never empty the list (so if user asks for #5 but
+            # only 3 candidates exist, we fall back to the last available).
+            rank_shift = min(max(1, rank_n), len(bundle)) - 1
         elif smart_sort_priority == util.CONST_SMART_SORT_PRICE_HIGH:
             # Highest price first; ties broken by remaining DESC then DOM order.
             bundle.sort(key=lambda x: (-x[2], -x[1], x[3]))
@@ -2077,9 +2110,14 @@ async def nodriver_get_tixcraft_target_area(el, config_dict, area_keyword_item):
             random.shuffle(bundle)
             sort_label = "RANDOM"
         else:
-            # Default: max remaining first; ties broken by DOM order.
+            # Unknown value -> behave like the default (high, #1).
             bundle.sort(key=lambda x: (-x[1], x[3]))
-            sort_label = "MAX remaining"
+            sort_label = "REMAINING rank HIGH #1 (fallback)"
+
+        # Apply the rank shift: drop the top `rank_shift` so the Nth element
+        # becomes the new head and the existing index-0 picker picks it.
+        if rank_shift > 0:
+            bundle = bundle[rank_shift:]
 
         matched_blocks = [r for r, _, _, _ in bundle]
         if debug.enabled:

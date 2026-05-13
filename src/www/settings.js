@@ -19,6 +19,23 @@ const area_keyword = document.querySelector('#area_keyword');
 const area_auto_fallback = document.querySelector('#area_auto_fallback');
 const area_price_filter = document.querySelector('#area_price_filter');
 const smart_sort_priority = document.querySelector('#smart_sort_priority');
+const smart_sort_rank_direction = document.querySelector('#smart_sort_rank_direction');
+const smart_sort_rank_n = document.querySelector('#smart_sort_rank_n');
+const row_smart_sort_rank = document.querySelector('#row_smart_sort_rank');
+const hint_smart_sort_rank = document.querySelector('#hint_smart_sort_rank');
+
+// Show the direction + Nth-rank controls only when the priority dropdown
+// is on "remaining rank". For "price high/low" / "random" the rank row
+// would be meaningless so we collapse it.
+function _toggle_smart_sort_rank_row() {
+    if (!row_smart_sort_rank) return;
+    const on = smart_sort_priority && smart_sort_priority.value === 'remaining rank';
+    row_smart_sort_rank.style.display = on ? '' : 'none';
+    if (hint_smart_sort_rank) hint_smart_sort_rank.style.display = on ? '' : 'none';
+}
+if (smart_sort_priority) {
+    smart_sort_priority.addEventListener('change', _toggle_smart_sort_rank_row);
+}
 
 // Toggle visibility based on whether the user is in smart mode.
 //   .smart-only         -> visible ONLY in smart mode
@@ -257,8 +274,26 @@ function load_settins_to_form(settings)
         area_keyword.value = format_keyword_for_display(settings.area_auto_select.area_keyword);
         area_auto_fallback.checked = settings.area_auto_fallback || false;
         if (area_price_filter) area_price_filter.value = settings.area_auto_select.price_filter || '';
-        if (smart_sort_priority) smart_sort_priority.value = settings.area_auto_select.smart_sort_priority || 'max remaining';
+        if (smart_sort_priority) {
+            const raw_priority = settings.area_auto_select.smart_sort_priority || 'remaining rank';
+            // Legacy values that we silently fold into the new rank scheme so the
+            // UI never shows an empty dropdown for older configs.
+            if (raw_priority === 'max remaining') {
+                smart_sort_priority.value = 'remaining rank';
+                if (smart_sort_rank_direction) smart_sort_rank_direction.value = 'high';
+                if (smart_sort_rank_n) smart_sort_rank_n.value = 1;
+            } else if (raw_priority === 'min remaining') {
+                smart_sort_priority.value = 'remaining rank';
+                if (smart_sort_rank_direction) smart_sort_rank_direction.value = 'low';
+                if (smart_sort_rank_n) smart_sort_rank_n.value = 1;
+            } else {
+                smart_sort_priority.value = raw_priority;
+                if (smart_sort_rank_direction) smart_sort_rank_direction.value = settings.area_auto_select.smart_sort_rank_direction || 'high';
+                if (smart_sort_rank_n) smart_sort_rank_n.value = settings.area_auto_select.smart_sort_rank_n || 1;
+            }
+        }
         _toggle_smart_rows();
+        _toggle_smart_sort_rank_row();
 
         keyword_exclude.value = format_keyword_for_display(settings.keyword_exclude);
         
@@ -517,7 +552,10 @@ function save_changes_to_dict(silent_flag)
             settings.area_auto_select.mode = area_select_mode.value;
             settings.area_auto_select.area_keyword = format_config_keyword_for_json(area_keyword.value);
             settings.area_auto_select.price_filter = area_price_filter ? area_price_filter.value.trim() : '';
-            settings.area_auto_select.smart_sort_priority = smart_sort_priority ? smart_sort_priority.value : 'max remaining';
+            settings.area_auto_select.smart_sort_priority = smart_sort_priority ? smart_sort_priority.value : 'remaining rank';
+            settings.area_auto_select.smart_sort_rank_direction = smart_sort_rank_direction ? smart_sort_rank_direction.value : 'high';
+            const raw_n = smart_sort_rank_n ? parseInt(smart_sort_rank_n.value, 10) : 1;
+            settings.area_auto_select.smart_sort_rank_n = (Number.isFinite(raw_n) && raw_n >= 1) ? raw_n : 1;
             // Drop deprecated keys so settings.json doesn't accumulate stale fields.
             delete settings.area_auto_select.price_min;
             delete settings.area_auto_select.price_max;

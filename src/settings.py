@@ -129,7 +129,12 @@ def get_default_config():
     config_dict["area_auto_select"]["price_filter"] = ""
     # Within smart mode, which order to grab from the candidate set.
     # See util.CONST_SMART_SORT_* for accepted values.
-    config_dict["area_auto_select"]["smart_sort_priority"] = "max remaining"
+    config_dict["area_auto_select"]["smart_sort_priority"] = "remaining rank"
+    # For "remaining rank" mode: pick the Nth section sorted by remaining
+    # count. direction = "high" picks from most-remaining-first;
+    # "low" picks from least-remaining-first. rank_n is 1-indexed.
+    config_dict["area_auto_select"]["smart_sort_rank_direction"] = "high"
+    config_dict["area_auto_select"]["smart_sort_rank_n"] = 1
     config_dict["keyword_exclude"] = CONST_EXCLUDE_DEFAULT
 
     config_dict['kktix']={}
@@ -294,6 +299,19 @@ def migrate_config(config_dict):
         # Drop deprecated keys regardless (clean up the JSON)
         area.pop("price_min", None)
         area.pop("price_max", None)
+
+        # Migrate the older "max remaining" / "min remaining" sort priorities
+        # to the new rank-based scheme so existing user setups keep their
+        # intended behaviour (max remaining = high+1, min remaining = low+1).
+        old_priority = str(area.get("smart_sort_priority", "")).strip()
+        if old_priority == "max remaining":
+            area["smart_sort_priority"] = "remaining rank"
+            area.setdefault("smart_sort_rank_direction", "high")
+            area.setdefault("smart_sort_rank_n", 1)
+        elif old_priority == "min remaining":
+            area["smart_sort_priority"] = "remaining rank"
+            area.setdefault("smart_sort_rank_direction", "low")
+            area.setdefault("smart_sort_rank_n", 1)
 
     # Ensure all default fields exist (fills missing keys from new versions)
     default = get_default_config()

@@ -24,11 +24,21 @@ CONST_PRICE_RANGE_MAX_REMAINING = "price range max remaining"
 
 # Sort priorities available WITHIN smart mode (which subset of matched
 # areas to grab first). Stored under area_auto_select.smart_sort_priority.
-CONST_SMART_SORT_MAX_REMAINING = "max remaining"   # default: most tickets first
-CONST_SMART_SORT_MIN_REMAINING = "min remaining"   # snipe sections about to sell out
-CONST_SMART_SORT_PRICE_HIGH    = "price high"      # premium-first
-CONST_SMART_SORT_PRICE_LOW     = "price low"       # budget-first
-CONST_SMART_SORT_RANDOM        = "random"          # spread the load across areas
+#
+# "remaining rank" replaces the older "max remaining" / "min remaining":
+# the direction (high|low) lives in smart_sort_rank_direction and the
+# 1-indexed position lives in smart_sort_rank_n. This lets the user dodge
+# the "everyone fights for the section with most tickets" problem by
+# picking, say, the 2nd-most-remaining section instead of the 1st.
+CONST_SMART_SORT_REMAINING_RANK = "remaining rank"
+CONST_SMART_SORT_PRICE_HIGH     = "price high"      # premium-first
+CONST_SMART_SORT_PRICE_LOW      = "price low"       # budget-first
+CONST_SMART_SORT_RANDOM         = "random"          # spread the load across areas
+
+# Legacy values kept ONLY so settings.py's migration can recognise them.
+# Don't reach for these in new code; use CONST_SMART_SORT_REMAINING_RANK.
+CONST_SMART_SORT_MAX_REMAINING_LEGACY = "max remaining"
+CONST_SMART_SORT_MIN_REMAINING_LEGACY = "min remaining"
 
 # Keyword delimiter constants (Issue #23)
 CONST_KEYWORD_DELIMITER = ';'  # New delimiter (semicolon)
