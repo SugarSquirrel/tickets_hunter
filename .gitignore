@@ -16,6 +16,9 @@ __pycache__/
 /src/MAXBOT_QUESTION.txt
 src/webdriver/*/data/settings.json
 src/webdriver/*/data/status.json
+# Named presets contain account credentials per profile — never upload
+/src/presets/
+/presets/
 
 # Browser data
 chrome_profile/

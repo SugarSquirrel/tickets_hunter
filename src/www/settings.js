@@ -1360,3 +1360,154 @@ document.addEventListener('keydown', function(e) {
 window.addEventListener('beforeunload', () => {
     stopQuestionPolling();
 });
+
+
+// ============================================================
+// Named presets (multi-account profiles)
+// ============================================================
+// Each preset is a full copy of settings.json saved under src/presets/{name}.json.
+// "Save as..." copies the CURRENT settings.json after first persisting any
+// unsaved form edits. "Load" overwrites settings.json with the chosen preset
+// and reloads the page so all inputs reflect the new values.
+
+const presets_dropdown      = document.querySelector('#presets_dropdown');
+const btn_load_preset       = document.querySelector('#btn_load_preset');
+const btn_save_preset       = document.querySelector('#btn_save_preset');
+const btn_delete_preset     = document.querySelector('#btn_delete_preset');
+const presets_status        = document.querySelector('#presets_status');
+
+function _presets_set_status(text, kind) {
+    // kind: '', 'ok', 'err'
+    if (!presets_status) return;
+    presets_status.textContent = text || '';
+    presets_status.classList.remove('text-success', 'text-danger', 'text-muted');
+    if (kind === 'ok')       presets_status.classList.add('text-success');
+    else if (kind === 'err') presets_status.classList.add('text-danger');
+    else                     presets_status.classList.add('text-muted');
+}
+
+function _refresh_presets_dropdown(selected_name) {
+    if (!presets_dropdown) return;
+    $.ajax({
+        url: '/presets/list',
+        type: 'GET',
+        dataType: 'json'
+    }).done(function(data) {
+        const names = (data && data.presets) ? data.presets : [];
+        // Preserve placeholder, then append one option per preset.
+        presets_dropdown.innerHTML = '<option value="">（請選擇）</option>';
+        names.forEach(function(name) {
+            const opt = document.createElement('option');
+            opt.value = name;
+            opt.textContent = name;
+            presets_dropdown.appendChild(opt);
+        });
+        if (selected_name && names.indexOf(selected_name) !== -1) {
+            presets_dropdown.value = selected_name;
+        }
+    }).fail(function(xhr, status, error) {
+        console.error('[Presets] list failed:', status, error);
+        _presets_set_status('讀取設定檔清單失敗', 'err');
+    });
+}
+
+if (btn_save_preset) {
+    btn_save_preset.addEventListener('click', function() {
+        const name = window.prompt('輸入設定檔名稱（例如：帳號A、阿姨帳、媽媽帳）：', '');
+        if (name === null) return;        // cancelled
+        const cleaned = (name || '').trim();
+        if (!cleaned) {
+            _presets_set_status('名稱不能為空', 'err');
+            return;
+        }
+        if (/[\/\\]|\.\./.test(cleaned) || cleaned.length > 64) {
+            _presets_set_status('名稱不能包含 / \\ ..，最多 64 字', 'err');
+            return;
+        }
+        // First flush any unsaved form edits to settings.json, then copy it.
+        _presets_set_status('儲存中…', '');
+        save_changes_to_dict(true);
+        maxbot_save_api(function() {
+            $.ajax({
+                url: '/presets/save',
+                type: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({name: cleaned}),
+                dataType: 'json'
+            }).done(function(data) {
+                if (data && data.success) {
+                    _presets_set_status('已存為「' + cleaned + '」', 'ok');
+                    _refresh_presets_dropdown(cleaned);
+                } else {
+                    _presets_set_status('存檔失敗：' + ((data && data.message) || '未知錯誤'), 'err');
+                }
+            }).fail(function(xhr, status, error) {
+                _presets_set_status('存檔失敗：' + status, 'err');
+            });
+        });
+    });
+}
+
+if (btn_load_preset) {
+    btn_load_preset.addEventListener('click', function() {
+        const name = presets_dropdown ? presets_dropdown.value : '';
+        if (!name) {
+            _presets_set_status('請先在下拉選擇設定檔', 'err');
+            return;
+        }
+        const ok = window.confirm(
+            '確定要載入「' + name + '」？\n\n' +
+            '此操作會覆蓋目前的 settings.json，未存檔的修改會遺失。\n' +
+            '載入完成後頁面會自動重新整理。'
+        );
+        if (!ok) return;
+        _presets_set_status('載入中…', '');
+        $.ajax({
+            url: '/presets/load',
+            type: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({name: name}),
+            dataType: 'json'
+        }).done(function(data) {
+            if (data && data.success) {
+                // Hard reload so every input rebinds from the new settings.json.
+                window.location.reload();
+            } else {
+                _presets_set_status('載入失敗：' + ((data && data.message) || '未知錯誤'), 'err');
+            }
+        }).fail(function(xhr, status, error) {
+            _presets_set_status('載入失敗：' + status, 'err');
+        });
+    });
+}
+
+if (btn_delete_preset) {
+    btn_delete_preset.addEventListener('click', function() {
+        const name = presets_dropdown ? presets_dropdown.value : '';
+        if (!name) {
+            _presets_set_status('請先在下拉選擇設定檔', 'err');
+            return;
+        }
+        const ok = window.confirm('確定要永久刪除「' + name + '」？此操作無法復原。');
+        if (!ok) return;
+        $.ajax({
+            url: '/presets/delete',
+            type: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({name: name}),
+            dataType: 'json'
+        }).done(function(data) {
+            if (data && data.success) {
+                _presets_set_status('已刪除「' + name + '」', 'ok');
+                _refresh_presets_dropdown('');
+            } else {
+                _presets_set_status('刪除失敗：' + ((data && data.message) || '未知錯誤'), 'err');
+            }
+        }).fail(function(xhr, status, error) {
+            _presets_set_status('刪除失敗：' + status, 'err');
+        });
+    });
+}
+
+// Populate the dropdown on initial load.
+_refresh_presets_dropdown('');

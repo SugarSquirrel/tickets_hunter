@@ -1295,6 +1295,22 @@
 
     </div>
     <hr/>
+    <div class="col-12 mb-3">
+      <div class="d-flex align-items-center flex-wrap gap-2">
+        <span class="text-secondary me-2">設定檔切換：</span>
+        <select id="presets_dropdown" class="form-select form-select-sm" style="max-width:200px;" aria-label="選擇設定檔">
+          <option value="">（請選擇）</option>
+        </select>
+        <button class="btn btn-sm btn-outline-primary" id="btn_load_preset" type="button">載入</button>
+        <button class="btn btn-sm btn-outline-success" id="btn_save_preset" type="button">另存為…</button>
+        <button class="btn btn-sm btn-outline-danger" id="btn_delete_preset" type="button">刪除</button>
+        <span class="text-muted small ms-2" id="presets_status"></span>
+      </div>
+      <small class="form-text text-muted d-block mt-1">
+        為不同帳號存多份設定（例如「帳號A」「帳號B」），切換只要兩個 click。<strong>另存為</strong> 會把目前設定存成新的 preset；<strong>載入</strong> 會把 preset 覆蓋到 settings.json 並重新載入頁面。檔案存在本機 <code>src/presets/</code>，不會上 GitHub。
+      </small>
+    </div>
+    <hr/>
     <div class="col-12">
       <button class="btn btn-primary" id="run_btn">搶票</button>
       <button class="btn btn-primary" id="save_btn">存檔</button>

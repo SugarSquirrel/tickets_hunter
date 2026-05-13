@@ -2906,78 +2906,114 @@ async def nodriver_tixcraft_ticket_main_ocr(tab, config_dict, ocr, Captcha_Brows
         if is_form_submitted:
             _state["ocr_completed_url"] = current_url
 
+# JS snippet that returns "blocked" only when the current page is the actual
+# PerimeterX EPS block page (action === "block"). Returning a string keeps the
+# CDP round-trip simple — zendriver mangles native object/array returns.
+_EPS_BLOCK_PROBE_JS = '''
+    (function() {
+        try {
+            if (typeof action !== "undefined" && action === "block") {
+                return JSON.stringify({
+                    blocked: true,
+                    rr: typeof rr !== "undefined" ? (rr || "") : "",
+                    client_ip: typeof client_ip !== "undefined" ? client_ip : ""
+                });
+            }
+        } catch(e) {}
+        return JSON.stringify({blocked: false, rr: "", client_ip: ""});
+    })()
+'''
+
+
+async def _eps_probe_blocked(tab):
+    """Return (is_blocked, original_url, client_ip). Never raises."""
+    try:
+        result_json = await tab.evaluate(_EPS_BLOCK_PROBE_JS)
+        if not result_json:
+            return (False, "", "")
+        result = json.loads(result_json)
+        return (
+            bool(result.get("blocked", False)),
+            str(result.get("rr", "") or ""),
+            str(result.get("client_ip", "") or ""),
+        )
+    except Exception:
+        return (False, "", "")
+
+
 async def nodriver_ticketmaster_check_ip_block(tab, config_dict):
     """Detect PerimeterX EPS block page on tixcraft/ticketmaster domains.
 
-    When blocked, waits 4-7 minutes (random) then navigates back to original URL.
-    Returns True if blocked (caller should skip normal processing), False otherwise.
+    When blocked, waits up to 4-7 minutes (random) for the block to lift —
+    BUT the wait is interruptible. If the user manually navigates away
+    from the block page during the wait (or the block lifts naturally),
+    we exit early instead of leaving the bot idling for minutes.
+
+    Returns:
+      True  -> caller should skip normal processing (we're either still
+               waiting or just finished waiting)
+      False -> not blocked; caller should proceed normally
     """
     debug = util.create_debug_logger(config_dict)
 
-    # Still within previous block wait period
+    # Always probe the live page first: this catches the case where the user
+    # has manually clicked back to a normal ticket page during our wait.
+    is_blocked, original_url, client_ip = await _eps_probe_blocked(tab)
+
+    if not is_blocked:
+        # If we had a pending wait timer, clear it — the page is fine now.
+        if _state.get("ip_block_until", 0) > 0:
+            debug.log("[EPS BLOCK] No longer on block page, resetting wait timer")
+            _state["ip_block_until"] = 0
+        return False
+
+    # We ARE on a block page. Did we already start a wait for it?
     block_until = _state.get("ip_block_until", 0)
     if block_until > 0 and time.time() < block_until:
-        remaining = int(block_until - time.time())
-        debug.log(f"[EPS BLOCK] Still waiting for block to expire, {remaining}s remaining")
-        await sleep_with_pause_check(tab, 5, config_dict)
-        return True
-
-    try:
-        result_json = await tab.evaluate('''
-            (function() {
-                try {
-                    if (typeof action !== "undefined" && action === "block" && typeof rr !== "undefined") {
-                        return JSON.stringify({
-                            blocked: true,
-                            rr: rr || "",
-                            client_ip: typeof client_ip !== "undefined" ? client_ip : ""
-                        });
-                    }
-                } catch(e) {}
-                return JSON.stringify({blocked: false, rr: "", client_ip: ""});
-            })()
-        ''')
-
-        if not result_json:
-            return False
-
-        result = json.loads(result_json)
-        if not result.get("blocked", False):
-            return False
-
-        original_url = result.get("rr", "")
-        client_ip = result.get("client_ip", "unknown")
-        # Random 4-7 minutes (240-420 seconds) to vary timing
+        # Still within the previously-started wait; let the wait loop below
+        # take over (so the user-navigation check still runs every 5s).
+        wait_seconds = max(1, int(block_until - time.time()))
+        debug.log(f"[EPS BLOCK] Still on block page, {wait_seconds}s remaining in wait")
+    else:
+        # First time detecting (or previous wait expired) — start a new wait.
         wait_seconds = random.randint(240, 420)
-
-        debug.log(f"[EPS BLOCK] IP blocked (IP: {client_ip}), waiting {wait_seconds}s before retry")
+        debug.log(f"[EPS BLOCK] IP blocked (IP: {client_ip}), waiting up to {wait_seconds}s before retry")
         _state["ip_block_until"] = time.time() + wait_seconds
 
-        waited = 0
-        while waited < wait_seconds:
-            if await check_and_handle_pause(config_dict):
-                return True
-            chunk = min(10, wait_seconds - waited)
-            await asyncio.sleep(chunk)
-            waited += chunk
-            remaining = wait_seconds - waited
-            if remaining > 0 and waited % 60 == 0:
-                debug.log(f"[EPS BLOCK] Waiting for block to expire, {remaining}s remaining")
+    # Wait loop: short chunks + cheap probe each iteration so we react to a
+    # user-driven navigation within ~5s instead of forcing them to wait
+    # out the full 4-7 minutes.
+    waited = 0
+    chunk_size = 5
+    while waited < wait_seconds:
+        if await check_and_handle_pause(config_dict):
+            return True
 
-        _state["ip_block_until"] = 0
+        await asyncio.sleep(chunk_size)
+        waited += chunk_size
 
-        if original_url:
-            debug.log(f"[EPS BLOCK] Block expired, navigating back to: {original_url}")
-            try:
-                await tab.get(original_url)
-            except Exception:
-                pass
+        # Re-probe: if the user has navigated away (or the block lifted),
+        # short-circuit out of the wait and let the main loop process the
+        # live URL right away.
+        still_blocked, _ru, _cip = await _eps_probe_blocked(tab)
+        if not still_blocked:
+            debug.log(f"[EPS BLOCK] Block page is gone after {waited}s — resuming immediately")
+            _state["ip_block_until"] = 0
+            return False
 
-        return True
+        remaining = wait_seconds - waited
+        if remaining > 0 and waited % 30 == 0:
+            debug.log(f"[EPS BLOCK] Still blocked, {remaining}s remaining")
 
-    except Exception as exc:
-        debug.log(f"[EPS BLOCK] Error checking block status: {exc}")
-        return False
+    # Full wait elapsed without user intervention; navigate back ourselves.
+    _state["ip_block_until"] = 0
+    if original_url:
+        debug.log(f"[EPS BLOCK] Wait expired, navigating back to: {original_url}")
+        try:
+            await tab.get(original_url)
+        except Exception:
+            pass
+    return True
 
 
 async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):

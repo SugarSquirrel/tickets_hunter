@@ -568,6 +568,151 @@ class SaveJsonHandler(tornado.web.RequestHandler):
 
         self.finish()
 
+# ===== Preset handlers =====
+# Each named preset is a full copy of settings.json saved under presets/.
+# This lets the user pre-configure multiple accounts (帳號A, 帳號B, ...)
+# and switch between them with two clicks instead of re-typing the form.
+
+CONST_PRESETS_DIRNAME = "presets"
+
+
+def _presets_dir():
+    """Return absolute path to the presets directory, creating it lazily."""
+    app_root = util.get_app_root()
+    presets_dir = os.path.join(app_root, CONST_PRESETS_DIRNAME)
+    if not os.path.isdir(presets_dir):
+        try:
+            os.makedirs(presets_dir, exist_ok=True)
+        except Exception as exc:
+            print(f"[PRESETS] Failed to create presets dir: {exc}")
+    return presets_dir
+
+
+def _validate_preset_name(name):
+    """Return cleaned name if valid, else None. Blocks path traversal + weirdness."""
+    if not isinstance(name, str):
+        return None
+    cleaned = name.strip()
+    if not cleaned:
+        return None
+    # No path separators, no parent-dir refs, no weird control chars.
+    if any(c in cleaned for c in ("/", "\\", "..", "\x00")):
+        return None
+    if len(cleaned) > 64:
+        return None
+    return cleaned
+
+
+class PresetsListHandler(tornado.web.RequestHandler):
+    def get(self):
+        names = []
+        try:
+            presets_dir = _presets_dir()
+            for fn in os.listdir(presets_dir):
+                if fn.endswith(".json") and not fn.startswith("."):
+                    names.append(fn[:-5])  # strip .json
+        except Exception as exc:
+            print(f"[PRESETS] List failed: {exc}")
+        self.write({"presets": sorted(names)})
+
+
+class PresetsSaveHandler(tornado.web.RequestHandler):
+    """Save the CURRENT settings.json as a named preset.
+
+    Workflow: the UI saves the form to settings.json first (existing /save
+    endpoint) and only then calls /presets/save to copy that file. This
+    keeps the source-of-truth single (settings.json) and avoids inventing
+    a second serialization path.
+    """
+    def post(self):
+        try:
+            body = json.loads(self.request.body)
+        except Exception:
+            self.write({"success": False, "message": "wrong json format"})
+            return
+
+        name = _validate_preset_name(body.get("name", ""))
+        if name is None:
+            self.write({"success": False, "message": "preset name is invalid (no /, \\, .., empty, or >64 chars)"})
+            return
+
+        app_root = util.get_app_root()
+        src_path = os.path.join(app_root, CONST_MAXBOT_CONFIG_FILE)
+        if not os.path.exists(src_path):
+            self.write({"success": False, "message": "settings.json does not exist yet"})
+            return
+
+        dst_path = os.path.join(_presets_dir(), name + ".json")
+        try:
+            with open(src_path, "r", encoding="utf-8") as src:
+                content = src.read()
+            with open(dst_path, "w", encoding="utf-8") as dst:
+                dst.write(content)
+            self.write({"success": True, "name": name})
+        except Exception as exc:
+            self.write({"success": False, "message": str(exc)})
+
+
+class PresetsLoadHandler(tornado.web.RequestHandler):
+    """Overwrite settings.json with the contents of a named preset."""
+    def post(self):
+        try:
+            body = json.loads(self.request.body)
+        except Exception:
+            self.write({"success": False, "message": "wrong json format"})
+            return
+
+        name = _validate_preset_name(body.get("name", ""))
+        if name is None:
+            self.write({"success": False, "message": "preset name is invalid"})
+            return
+
+        src_path = os.path.join(_presets_dir(), name + ".json")
+        if not os.path.exists(src_path):
+            self.write({"success": False, "message": f"preset '{name}' does not exist"})
+            return
+
+        app_root = util.get_app_root()
+        dst_path = os.path.join(app_root, CONST_MAXBOT_CONFIG_FILE)
+        try:
+            with open(src_path, "r", encoding="utf-8") as src:
+                content = src.read()
+            # Validate the preset is parseable before overwriting, so a
+            # corrupted file can't brick the bot.
+            json.loads(content)
+            with open(dst_path, "w", encoding="utf-8") as dst:
+                dst.write(content)
+            self.write({"success": True, "name": name})
+        except json.JSONDecodeError as exc:
+            self.write({"success": False, "message": f"preset is not valid JSON: {exc}"})
+        except Exception as exc:
+            self.write({"success": False, "message": str(exc)})
+
+
+class PresetsDeleteHandler(tornado.web.RequestHandler):
+    def post(self):
+        try:
+            body = json.loads(self.request.body)
+        except Exception:
+            self.write({"success": False, "message": "wrong json format"})
+            return
+
+        name = _validate_preset_name(body.get("name", ""))
+        if name is None:
+            self.write({"success": False, "message": "preset name is invalid"})
+            return
+
+        target = os.path.join(_presets_dir(), name + ".json")
+        if not os.path.exists(target):
+            self.write({"success": False, "message": f"preset '{name}' does not exist"})
+            return
+        try:
+            os.remove(target)
+            self.write({"success": True, "name": name})
+        except Exception as exc:
+            self.write({"success": False, "message": str(exc)})
+
+
 class SendkeyHandler(tornado.web.RequestHandler):
     def post(self):
         self.set_header("Access-Control-Allow-Origin", "*")
@@ -841,6 +986,12 @@ async def main_server():
         ("/load", LoadJsonHandler),
         ("/save", SaveJsonHandler),
         ("/reset", ResetJsonHandler),
+
+        # named presets (multi-account support)
+        ("/presets/list", PresetsListHandler),
+        ("/presets/save", PresetsSaveHandler),
+        ("/presets/load", PresetsLoadHandler),
+        ("/presets/delete", PresetsDeleteHandler),
 
         ("/test_discord_webhook", TestDiscordWebhookHandler),
         ("/test_telegram", TestTelegramHandler),
