@@ -852,16 +852,21 @@ function maxbot_status_api()
     })
     .done(function(data) {
         //alert( "second success" );
+        // Pump the status badge up with size + padding so it's hard to miss.
         let status_text = "已暫停";
-        let status_class = "badge text-bg-danger";
+        let status_class = "badge text-bg-danger fs-5 px-3 py-2";
         if(data.status) {
             status_text="已啟動";
-            status_class = "badge text-bg-success";
+            status_class = "badge text-bg-success fs-5 px-3 py-2";
             $("#pause_btn").removeClass("disappear");
             $("#resume_btn").addClass("disappear");
+            // Running -> hide the "press resume!" arrow.
+            $("#resume_btn_arrow").addClass("disappear");
         } else {
             $("#pause_btn").addClass("disappear");
             $("#resume_btn").removeClass("disappear");
+            // Paused -> surface the arrow that points at the resume button.
+            $("#resume_btn_arrow").removeClass("disappear");
         }
         $("#last_url").text(data.last_url);
         $("#maxbot_status").html(status_text).prop( "class", status_class);
@@ -1411,8 +1416,61 @@ window.addEventListener('beforeunload', () => {
 const presets_dropdown      = document.querySelector('#presets_dropdown');
 const btn_load_preset       = document.querySelector('#btn_load_preset');
 const btn_save_preset       = document.querySelector('#btn_save_preset');
+const btn_edit_preset       = document.querySelector('#btn_edit_preset');
 const btn_delete_preset     = document.querySelector('#btn_delete_preset');
 const presets_status        = document.querySelector('#presets_status');
+const preset_edit_banner    = document.querySelector('#preset_edit_banner');
+const preset_edit_name      = document.querySelector('#preset_edit_name');
+const btn_save_to_preset    = document.querySelector('#btn_save_to_preset');
+const btn_exit_edit_preset  = document.querySelector('#btn_exit_edit_preset');
+
+// Name of the preset currently being edited in "decoupled" mode (form
+// shows the preset, settings.json is left alone). Empty string when not
+// in edit mode.
+let _editing_preset_name = '';
+
+function _set_save_button_warning(active) {
+    const save_btn = document.querySelector('#save_btn');
+    if (!save_btn) return;
+    if (active) {
+        save_btn.classList.add('btn-danger');
+        save_btn.classList.remove('btn-primary');
+        save_btn.dataset._origText = save_btn.dataset._origText || save_btn.textContent;
+        save_btn.textContent = '⚠️ 存檔（會覆蓋 settings.json，影響搶票中）';
+    } else {
+        save_btn.classList.remove('btn-danger');
+        save_btn.classList.add('btn-primary');
+        if (save_btn.dataset._origText) {
+            save_btn.textContent = save_btn.dataset._origText;
+        }
+    }
+}
+
+function _toggle_preset_main_buttons(disabled) {
+    // Lock the buttons that write settings.json while we're editing a
+    // non-active preset, so a misclick can't pollute the running bot.
+    [btn_load_preset, btn_save_preset, btn_edit_preset, btn_delete_preset].forEach(function(btn) {
+        if (!btn) return;
+        btn.disabled = !!disabled;
+        if (disabled) btn.classList.add('disabled');
+        else btn.classList.remove('disabled');
+    });
+}
+
+function _enter_edit_mode(name) {
+    _editing_preset_name = name || '';
+    if (preset_edit_banner) preset_edit_banner.style.display = _editing_preset_name ? '' : 'none';
+    if (preset_edit_name)   preset_edit_name.textContent = _editing_preset_name;
+    _set_save_button_warning(!!_editing_preset_name);
+    _toggle_preset_main_buttons(!!_editing_preset_name);
+}
+
+function _exit_edit_mode() {
+    _editing_preset_name = '';
+    if (preset_edit_banner) preset_edit_banner.style.display = 'none';
+    _set_save_button_warning(false);
+    _toggle_preset_main_buttons(false);
+}
 
 function _presets_set_status(text, kind) {
     // kind: '', 'ok', 'err'
@@ -1516,6 +1574,82 @@ if (btn_load_preset) {
         }).fail(function(xhr, status, error) {
             _presets_set_status('載入失敗：' + status, 'err');
         });
+    });
+}
+
+// 「📝 編輯」: pull preset content into the form WITHOUT touching
+// settings.json. The bot keeps running off the original config.
+if (btn_edit_preset) {
+    btn_edit_preset.addEventListener('click', function() {
+        const name = presets_dropdown ? presets_dropdown.value : '';
+        if (!name) {
+            _presets_set_status('請先在下拉選擇要編輯的設定檔', 'err');
+            return;
+        }
+        if (_editing_preset_name && _editing_preset_name !== name) {
+            const ok = window.confirm(
+                '已經在編輯「' + _editing_preset_name + '」。' +
+                '切換到「' + name + '」會丟掉未存的修改，繼續嗎？'
+            );
+            if (!ok) return;
+        }
+        $.ajax({
+            url: '/presets/get',
+            type: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({name: name}),
+            dataType: 'json'
+        }).done(function(data) {
+            if (data && data.success && data.config) {
+                // Populate UI from the preset's config (NOT settings.json).
+                settings = data.config;
+                load_settins_to_form(data.config);
+                _enter_edit_mode(name);
+                _presets_set_status('已載入「' + name + '」到表單。settings.json 沒被動。', 'ok');
+            } else {
+                _presets_set_status('編輯載入失敗：' + ((data && data.message) || '未知錯誤'), 'err');
+            }
+        }).fail(function(xhr, status, error) {
+            _presets_set_status('編輯載入失敗：' + status, 'err');
+        });
+    });
+}
+
+// 「💾 存到 preset」: write the form contents straight into the preset
+// file. settings.json is left untouched so a running bot is unaffected.
+if (btn_save_to_preset) {
+    btn_save_to_preset.addEventListener('click', function() {
+        if (!_editing_preset_name) {
+            _presets_set_status('不在編輯模式，按這顆無效', 'err');
+            return;
+        }
+        // Pull current form values into the `settings` global.
+        save_changes_to_dict(true);
+        $.ajax({
+            url: '/presets/write_form',
+            type: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({name: _editing_preset_name, config: settings}),
+            dataType: 'json'
+        }).done(function(data) {
+            if (data && data.success) {
+                _presets_set_status('已存到「' + _editing_preset_name + '」（settings.json 沒被動）', 'ok');
+            } else {
+                _presets_set_status('存到 preset 失敗：' + ((data && data.message) || '未知錯誤'), 'err');
+            }
+        }).fail(function(xhr, status, error) {
+            _presets_set_status('存到 preset 失敗：' + status, 'err');
+        });
+    });
+}
+
+// 「✖ 結束編輯」: drop edit mode and refresh the form from the active
+// settings.json so the user sees what the bot is actually running on.
+if (btn_exit_edit_preset) {
+    btn_exit_edit_preset.addEventListener('click', function() {
+        _exit_edit_mode();
+        maxbot_load_api();           // re-pulls settings.json into the form
+        _presets_set_status('已結束編輯，表單已重新載入 settings.json', '');
     });
 }
 

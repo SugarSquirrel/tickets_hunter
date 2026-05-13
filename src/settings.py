@@ -707,6 +707,75 @@ class PresetsLoadHandler(tornado.web.RequestHandler):
             self.write({"success": False, "message": str(exc)})
 
 
+class PresetsGetHandler(tornado.web.RequestHandler):
+    """Read a preset's content WITHOUT touching settings.json.
+
+    Used by the "編輯模式" workflow: the UI loads the preset into the form
+    only, so the still-running bot keeps reading the original settings.json
+    until the user explicitly applies the changes.
+    """
+    def post(self):
+        try:
+            body = json.loads(self.request.body)
+        except Exception:
+            self.write({"success": False, "message": "wrong json format"})
+            return
+
+        name = _validate_preset_name(body.get("name", ""))
+        if name is None:
+            self.write({"success": False, "message": "preset name is invalid"})
+            return
+
+        src_path = os.path.join(_presets_dir(), name + ".json")
+        if not os.path.exists(src_path):
+            self.write({"success": False, "message": f"preset '{name}' does not exist"})
+            return
+        try:
+            with open(src_path, "r", encoding="utf-8") as src:
+                content = src.read()
+            parsed = json.loads(content)   # validate the preset is still readable
+            self.write({"success": True, "name": name, "config": parsed})
+        except json.JSONDecodeError as exc:
+            self.write({"success": False, "message": f"preset is not valid JSON: {exc}"})
+        except Exception as exc:
+            self.write({"success": False, "message": str(exc)})
+
+
+class PresetsWriteFormHandler(tornado.web.RequestHandler):
+    """Write a JSON config payload straight into a preset file.
+
+    Unlike /presets/save (which copies settings.json), this writes the
+    body's ``config`` field directly into ``presets/<name>.json`` so the
+    user can edit a non-active preset while a bot keeps running off the
+    untouched settings.json.
+    """
+    def post(self):
+        try:
+            body = json.loads(self.request.body)
+        except Exception:
+            self.write({"success": False, "message": "wrong json format"})
+            return
+
+        name = _validate_preset_name(body.get("name", ""))
+        if name is None:
+            self.write({"success": False, "message": "preset name is invalid"})
+            return
+
+        config = body.get("config")
+        if not isinstance(config, dict):
+            self.write({"success": False, "message": "config payload must be a JSON object"})
+            return
+
+        dst_path = os.path.join(_presets_dir(), name + ".json")
+        try:
+            # Pretty-print so a human can diff the file if they edit it later.
+            with open(dst_path, "w", encoding="utf-8") as dst:
+                json.dump(config, dst, ensure_ascii=False, indent=4)
+            self.write({"success": True, "name": name})
+        except Exception as exc:
+            self.write({"success": False, "message": str(exc)})
+
+
 class PresetsDeleteHandler(tornado.web.RequestHandler):
     def post(self):
         try:
@@ -1010,6 +1079,10 @@ async def main_server():
         ("/presets/save", PresetsSaveHandler),
         ("/presets/load", PresetsLoadHandler),
         ("/presets/delete", PresetsDeleteHandler),
+        # "Edit mode" — read/write a preset without touching settings.json
+        # so a still-running bot keeps using the original config.
+        ("/presets/get", PresetsGetHandler),
+        ("/presets/write_form", PresetsWriteFormHandler),
 
         ("/test_discord_webhook", TestDiscordWebhookHandler),
         ("/test_telegram", TestTelegramHandler),

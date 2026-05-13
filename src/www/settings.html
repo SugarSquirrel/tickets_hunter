@@ -1217,12 +1217,13 @@
 
       <!-- tab 6 -->
       <div class="tab-pane fade" id="runtime-tab-pane" role="tabpanel" aria-labelledby="runtime-tab" tabindex="2">
-        <div class="row mb-3">
-          <label class="col-sm-2 col-form-label">執行狀態</label>
-          <div class="col-sm-10 col-lg-8 col-xl-6">
-            <span id="maxbot_status"></span>
+        <div class="row mb-3 align-items-center" id="runtime_status_row">
+          <label class="col-sm-2 col-form-label fw-bold text-warning fs-5">⚡ 執行狀態</label>
+          <div class="col-sm-10 col-lg-8 col-xl-6 d-flex align-items-center flex-wrap gap-2">
+            <span id="maxbot_status" class="fs-6"></span>
             <button class="btn btn-primary" id="pause_btn">暫停搶票</button>
             <button class="btn btn-primary" id="resume_btn">繼續搶票</button>
+            <span id="resume_btn_arrow" class="text-warning fw-bold disappear" style="font-size:1.05rem;">← 別忘了按這顆才會繼續搶</span>
           </div>
         </div>
 
@@ -1338,12 +1339,22 @@
         </select>
         <button class="btn btn-sm btn-outline-primary" id="btn_load_preset" type="button">載入</button>
         <button class="btn btn-sm btn-outline-success" id="btn_save_preset" type="button">另存為…</button>
+        <button class="btn btn-sm btn-outline-warning" id="btn_edit_preset" type="button" title="僅載入到表單，不覆蓋 settings.json，搶票中的 bot 完全不受影響">📝 編輯</button>
         <button class="btn btn-sm btn-outline-danger" id="btn_delete_preset" type="button">刪除</button>
         <span class="text-muted small ms-2" id="presets_status"></span>
       </div>
       <small class="form-text text-muted d-block mt-1">
-        為不同帳號存多份設定（例如「帳號A」「帳號B」），切換只要兩個 click。<strong>另存為</strong> 會把目前設定存成新的 preset；<strong>載入</strong> 會把 preset 覆蓋到 settings.json 並重新載入頁面。檔案存在本機 <code>src/presets/</code>，不會上 GitHub。
+        為不同帳號存多份設定（例如「帳號A」「帳號B」），切換只要兩個 click。<strong>另存為</strong> 會把目前設定存成新的 preset；<strong>載入</strong> 會把 preset 覆蓋到 settings.json 並重新載入頁面（會影響搶票中的 bot！）；<strong>📝 編輯</strong> 載入到表單但不動 settings.json（適合搶票中編輯第二份設定）。檔案存在本機 <code>src/presets/</code>，不會上 GitHub。
       </small>
+      <!-- Banner shown only while editing a non-active preset. -->
+      <div class="alert alert-warning d-flex align-items-center flex-wrap gap-2 mt-2 mb-0" id="preset_edit_banner" role="alert" style="display:none;">
+        <div class="flex-grow-1">
+          <strong>🔧 編輯中：</strong><span id="preset_edit_name" class="fw-bold"></span>
+          <small class="d-block text-muted">表單顯示的是這個 preset 的內容，<strong>settings.json 沒有被改</strong>。在此模式下儲存請用下面的按鈕，搶票中的 bot 不會受影響。</small>
+        </div>
+        <button class="btn btn-sm btn-success" id="btn_save_to_preset" type="button">💾 存到 preset</button>
+        <button class="btn btn-sm btn-secondary" id="btn_exit_edit_preset" type="button">✖ 結束編輯</button>
+      </div>
     </div>
     <hr/>
     <div class="col-12">
