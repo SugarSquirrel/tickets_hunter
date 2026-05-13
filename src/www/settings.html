@@ -473,12 +473,12 @@
             </small>
             <div class="input-group mt-2" id="row_smart_sort_rank">
               <span class="input-group-text">方向</span>
-              <select id="smart_sort_rank_direction" class="form-select highlight-field" style="max-width:170px;">
+              <select id="smart_sort_rank_direction" class="form-select highlight-field" style="width:auto; min-width:260px; flex:0 0 auto;">
                 <option value="high">↓ 從多到少（剩越多越先搶）</option>
                 <option value="low">↑ 從少到多（剩越少越先搶）</option>
               </select>
               <span class="input-group-text">第</span>
-              <input class="form-control highlight-field" id="smart_sort_rank_n" type="number" min="1" step="1" value="1" style="max-width:90px;" />
+              <input class="form-control highlight-field" id="smart_sort_rank_n" type="number" min="1" step="1" value="1" style="max-width:60px; flex:0 0 auto;" />
               <span class="input-group-text">名</span>
             </div>
             <small class="form-text text-muted d-block mt-1" id="hint_smart_sort_rank">
@@ -990,7 +990,7 @@
         <div class="row mb-3" data-under="tixcraft">
           <label for="tixcraft_sid" class="col-sm-2 col-form-label">拓元家族 cookie (TIXUISID / IVUISID / TIXPUISID)<span class="help-icon" data-help="tixcraft_sid" title="拓元家族 Cookie 說明" tabindex="0" role="button" aria-label="拓元家族 Cookie 說明"></span></label>
           <div class="col-sm-10 col-lg-8 col-xl-6">
-            <input class="form-control" id="tixcraft_sid" value="" />
+            <input class="form-control highlight-field" id="tixcraft_sid" value="" />
             <div class="alert alert-warning alert-dismissible fade mt-2" id="tixcraft-sid-warning" role="alert" style="display: none;">
               <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-exclamation-triangle-fill me-2" viewBox="0 0 16 16">
                 <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
