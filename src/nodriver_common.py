@@ -619,21 +619,37 @@ def convert_remote_object(obj, depth=0):
     else:
         return obj
 
-async def nodriver_current_url(tab):
-    is_quit_bot = False
-    exit_bot_error_strings = [
-        "server rejected WebSocket connection: HTTP 500",
-        "[Errno 61] Connect call failed ('127.0.0.1',",
-        "[WinError 1225] ",
-    ]
-    # WebSocket connection closed normally (e.g. after purchase completed or page navigation)
-    # These are expected and should not be printed
-    silent_error_strings = [
-        "no close frame received or sent",
-        "no close frame sent",
-        "no close frame received",
-    ]
+# Counter shared across calls so we still do a "real" CDP round-trip every
+# now and then. The cached tab.target.url is great for normal polling but
+# can't detect a dropped WebSocket connection (the cached value just sits
+# there); js_dumps both reads the URL AND fails loudly on dead CDP.
+_URL_DEEP_CHECK_INTERVAL = 20    # 20 iterations × 50ms main loop ≈ 1 sec
+_url_check_counter = 0
 
+# Connection-death markers from the CDP layer. When we see these strings
+# we tell the caller to quit so the bot doesn't loop forever against a
+# dead browser.
+_EXIT_BOT_ERROR_STRINGS = (
+    "server rejected WebSocket connection: HTTP 500",
+    "[Errno 61] Connect call failed ('127.0.0.1',",
+    "[WinError 1225] ",
+)
+# These show up during normal teardown (purchase complete, manual close) —
+# expected, not worth spamming the console with.
+_SILENT_ERROR_STRINGS = (
+    "no close frame received or sent",
+    "no close frame sent",
+    "no close frame received",
+)
+
+
+async def _nodriver_current_url_deep(tab):
+    """Original implementation: js_dumps round-trip + connection-death detect.
+
+    Kept as the slow path because js_dumps' failure modes are how we know
+    the browser is gone. Called every _URL_DEEP_CHECK_INTERVAL iterations.
+    """
+    is_quit_bot = False
     url = ""
     if tab:
         url_dict = {}
@@ -643,24 +659,94 @@ async def nodriver_current_url(tab):
             str_exc = ""
             try:
                 str_exc = str(exc)
-            except Exception as exc2:
+            except Exception:
                 pass
-            is_silent = any(s in str_exc for s in silent_error_strings)
+            is_silent = any(s in str_exc for s in _SILENT_ERROR_STRINGS)
             if not is_silent:
                 print(exc)
-            if len(str_exc) > 0:
-                for each_error_string in exit_bot_error_strings:
+            if str_exc:
+                for each_error_string in _EXIT_BOT_ERROR_STRINGS:
                     if each_error_string in str_exc:
                         is_quit_bot = True
 
         url_array = []
         if url_dict:
             for k in url_dict:
-                if k.isnumeric():
-                    if "0" in url_dict[k]:
-                        url_array.append(url_dict[k]["0"])
+                if k.isnumeric() and "0" in url_dict[k]:
+                    url_array.append(url_dict[k]["0"])
             url = ''.join(url_array)
     return url, is_quit_bot
+
+
+async def nodriver_current_url(tab):
+    """Get the current page URL with a fast cached path.
+
+    Fast path (~95% of calls): read ``tab.target.url`` — zendriver keeps
+    this synced via Target.targetInfoChanged events, no CDP round-trip
+    needed. Costs essentially zero on the main loop.
+
+    Deep path (every _URL_DEEP_CHECK_INTERVAL calls or when fast path
+    returns empty): the original js_dumps call. It both reads the URL
+    AND surfaces dropped-connection errors that flag is_quit_bot, so
+    we still notice a dead browser within ~1 second.
+    """
+    global _url_check_counter
+    _url_check_counter += 1
+    do_deep = (_url_check_counter % _URL_DEEP_CHECK_INTERVAL == 0)
+
+    if not do_deep:
+        try:
+            if tab and getattr(tab, 'target', None):
+                cached_url = getattr(tab.target, 'url', '') or ''
+                if cached_url:
+                    return cached_url, False
+        except Exception:
+            pass
+        # Fast path didn't yield anything useful — fall through to deep
+        # check so we don't return a bogus empty URL on startup.
+
+    return await _nodriver_current_url_deep(tab)
+
+async def batch_get_row_texts(tab, css_selector):
+    """Fetch ``textContent`` for every element matching ``css_selector`` in ONE call.
+
+    The per-row pattern ``for row in elements: await row.get_html()`` costs
+    one CDP round-trip per row, which dominates scan time when there are
+    many rows (sections, areas, dates). This helper collapses that into a
+    single ``tab.evaluate()`` call that hands back a JSON list of texts,
+    so scan time becomes O(1) DOM round-trips regardless of N.
+
+    Returns a list of strings, one per matching element, in document order.
+    Returns ``[]`` if the call fails or nothing matches. Never raises.
+
+    Implementation detail: we wrap the JS in ``JSON.stringify`` because
+    zendriver's evaluate() can mangle native JS arrays when converting
+    them to Python (we hit ``'NoneType' object is not callable`` on the
+    raw-array path while porting tixcraft scan, hence the string detour).
+    """
+    if not tab or not css_selector:
+        return []
+    try:
+        # Single-quote escape so user-supplied selectors can't break the JS.
+        # We only allow CSS selectors here, so the basic escape is enough.
+        safe_selector = css_selector.replace("\\", "\\\\").replace("'", "\\'")
+        js = (
+            "JSON.stringify("
+            "Array.from(document.querySelectorAll('" + safe_selector + "'))"
+            ".map(function(el) { return el.textContent || ''; })"
+            ")"
+        )
+        out_json = await tab.evaluate(js)
+        if not out_json:
+            return []
+        import json as _json
+        out = _json.loads(out_json)
+        if not isinstance(out, list):
+            return []
+        return [str(x or "") for x in out]
+    except Exception:
+        return []
+
 
 async def nodriver_resize_window(tab, config_dict):
     if len(config_dict["advanced"]["window_size"]) > 0:

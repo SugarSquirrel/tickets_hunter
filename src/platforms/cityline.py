@@ -8,6 +8,7 @@ import time
 
 import util
 from nodriver_common import (
+    batch_get_row_texts,
     check_and_handle_pause,
     fetch_notification_extras,
     handle_cloudflare_challenge,
@@ -179,14 +180,28 @@ async def nodriver_cityline_date_auto_select(tab, config_dict):
         # Match keyword
         debug.log(f"[DATE KEYWORD] Matching keyword: {date_keyword}")
 
-        for row in formated_area_list:
+        # FAST PATH: pull every date row's text in ONE CDP round-trip
+        # instead of N round-trips of get_html(). On a typical Cityline
+        # event with 8-20 dates this drops scan time from ~Nx10-50ms
+        # to a single ~30ms call.
+        batch_texts = await batch_get_row_texts(tab, my_css_selector)
+        use_batch = (len(batch_texts) == len(formated_area_list))
+        if not use_batch and batch_texts:
+            debug.log(f"[DATE KEYWORD] Batch returned {len(batch_texts)} rows but "
+                      f"formated_area_list has {len(formated_area_list)} — "
+                      f"falling back to per-row read")
+
+        for idx, row in enumerate(formated_area_list):
             row_text = ""
-            try:
-                row_html = await row.get_html()
-                row_text = util.remove_html_tags(row_html)
-            except Exception as exc:
-                debug.log(f"[DEBUG] get row html error: {exc}")
-                break
+            if use_batch:
+                row_text = batch_texts[idx]
+            else:
+                try:
+                    row_html = await row.get_html()
+                    row_text = util.remove_html_tags(row_html)
+                except Exception as exc:
+                    debug.log(f"[DEBUG] get row html error: {exc}")
+                    break
 
             if len(row_text) > 0:
                 debug.log(f"[DEBUG] row_text: {row_text}")
