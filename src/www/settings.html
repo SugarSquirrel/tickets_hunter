@@ -434,26 +434,49 @@
         <div class="row mb-3 smart-only" id="row_price_filter" style="display:none;">
           <label for="area_price_filter" class="col-sm-2 col-form-label">接受的價位</label>
           <div class="col-sm-10 col-lg-8 col-xl-6">
-            <input class="form-control highlight-field" id="area_price_filter" type="text" autocomplete="off" placeholder="例如 4480-6680 或 4480;6680 或 -5000（留空 = 不限）" />
+            <input class="form-control highlight-field" id="area_price_filter" type="text" autocomplete="off" placeholder="例如 4480-6680 或 4480>3880 或 4480;6680（留空 = 不限）" />
             <small class="form-text text-muted d-block mt-1">
               僅在「智能選擇」模式生效。<code>4,480</code> 與 <code>4480</code> 等同（自動忽略逗號、空格、貨幣符號）。
+              <strong>三個運算子</strong>：<code>-</code> 範圍｜<code>;</code> 並列（不分先後）｜<code>&gt;</code> 優先順序（先試左邊，沒票才退到右邊）。
             </small>
             <details class="mt-2">
               <summary class="text-muted small" style="cursor:pointer;">📌 價位寫法一覽（點擊展開）</summary>
               <div class="mt-2 small">
+                <p class="mb-2"><strong>三個運算子的功能：</strong></p>
                 <table class="table table-sm table-bordered mb-2">
-                  <thead><tr><th style="width:30%">寫法</th><th>意思</th></tr></thead>
+                  <thead><tr><th style="width:18%">運算子</th><th>意思</th><th>什麼時候用</th></tr></thead>
+                  <tbody>
+                    <tr><td><code>-</code></td><td>連續範圍</td><td>「3880 到 4380 之間的票都可以」</td></tr>
+                    <tr><td><code>;</code></td><td>並列 (OR)</td><td>「這幾個價位都可以，沒有先後之分，由『排序優先』下拉決定」</td></tr>
+                    <tr><td><code>&gt;</code></td><td>優先順序</td><td>「先搶左邊；左邊完全沒票才退到右邊」</td></tr>
+                  </tbody>
+                </table>
+                <p class="mb-2"><strong>實際寫法範例：</strong></p>
+                <table class="table table-sm table-bordered mb-2">
+                  <thead><tr><th style="width:35%">寫法</th><th>意思</th></tr></thead>
                   <tbody>
                     <tr><td>（留空）</td><td>不限價位，所有可用區域都列入候選</td></tr>
                     <tr><td><code>4480</code></td><td>只接受 4480 元的區域</td></tr>
                     <tr><td><code>4,480</code></td><td>同上（千分位逗號自動忽略）</td></tr>
-                    <tr><td><code>4480;6680</code></td><td>4480 <strong>或</strong> 6680（用 <code>;</code> 分隔多個價位）</td></tr>
                     <tr><td><code>4480-6680</code></td><td>4480 到 6680 之間（連續區間）</td></tr>
+                    <tr><td><code>6680-4480</code></td><td>同 <code>4480-6680</code>，<strong>順序無關</strong>，自動 swap 成 4480-6680</td></tr>
                     <tr><td><code>-5000</code></td><td>5000 以下（無下限）</td></tr>
                     <tr><td><code>4480-</code></td><td>4480 以上（無上限）</td></tr>
-                    <tr><td><code>3000-4500;6680;8000-9000</code></td><td>多個區間 + 單一價混合</td></tr>
+                    <tr><td><code>4480;6680</code></td><td>4480 <strong>或</strong> 6680 都接受（並列，由「排序優先」決定先後）</td></tr>
+                    <tr><td class="table-warning"><code>4480&gt;6680</code></td><td>👉 <strong>先搶 4480</strong>；如果 4480 完全沒票，<strong>才退到 6680</strong></td></tr>
+                    <tr><td class="table-warning"><code>6680&gt;4480</code></td><td>👉 <strong>先搶 6680</strong>；沒票才退到 4480</td></tr>
+                    <tr><td><code>4480-5500&gt;3880</code></td><td>先搶 4480~5500 範圍內的票；整個範圍都沒票才退到 3880</td></tr>
+                    <tr><td><code>4480&gt;3880;5500</code></td><td>先搶 4480；沒票才退到「3880 或 5500」（後者由排序優先決定）</td></tr>
+                    <tr><td><code>3000-4500;6680;8000-9000</code></td><td>三段並列，由排序優先決定</td></tr>
                   </tbody>
                 </table>
+                <p class="mb-2"><strong>運算子優先級規則</strong>：<code>;</code> 比 <code>&gt;</code> 結合得更緊（像數學的 × 比 + 緊）。
+                所以 <code>A&gt;B;C</code> 讀作「先 A；沒票才試 B 或 C」，不是「先 (A 或 B)；沒票才試 C」。</p>
+                <p class="mb-2"><strong>選 <code>;</code> 還是 <code>&gt;</code>？</strong></p>
+                <ul class="mb-2 ps-3">
+                  <li><strong>想同時保留多個選項</strong>（例如「我可以接受 4480 或 6680，看哪個剩比較多就抓」） → 用 <code>;</code></li>
+                  <li><strong>想嚴格按優先順序</strong>（例如「一定要 6680，沒了才將就 4480」） → 用 <code>&gt;</code></li>
+                </ul>
                 <p class="mb-0 text-muted">票價數字必須 ≥ 100 才會被當價錢解析（避免把「剩餘 5」誤判成價錢 5 元）。</p>
               </div>
             </details>

@@ -1857,8 +1857,9 @@ async def nodriver_get_tixcraft_target_area(el, config_dict, area_keyword_item):
     is_smart_mode = (area_auto_select_mode == util.CONST_PRICE_RANGE_MAX_REMAINING)
     price_ranges = []
     smart_sort_priority = util.CONST_SMART_SORT_MAX_REMAINING
+    price_tiers = []
     if is_smart_mode:
-        price_ranges = util.parse_price_filter_spec(
+        price_tiers = util.parse_price_filter_tiered_spec(
             config_dict["area_auto_select"].get("price_filter", "")
         )
         smart_sort_priority = (
@@ -1877,7 +1878,7 @@ async def nodriver_get_tixcraft_target_area(el, config_dict, area_keyword_item):
             rank_n = 1
         if rank_n < 1:
             rank_n = 1
-        debug.log(f"[AREA SMART] Price filter ranges: {price_ranges}")
+        debug.log(f"[AREA SMART] Price filter tiers: {price_tiers}")
         debug.log(f"[AREA SMART] Sort priority: {smart_sort_priority}")
         if smart_sort_priority == util.CONST_SMART_SORT_REMAINING_RANK:
             debug.log(f"[AREA SMART] Rank: direction={rank_direction}, n={rank_n}")
@@ -1937,6 +1938,9 @@ async def nodriver_get_tixcraft_target_area(el, config_dict, area_keyword_item):
     # Parallel arrays only used in smart mode for sorting after the loop.
     smart_remaining_counts = []
     smart_prices = []
+    # Which priority tier each candidate belongs to. Lower index = higher priority.
+    # Filled in by find_price_tier_index using price_tiers.
+    smart_tier_indices = []
 
     for area_index, row in enumerate(area_list, start=1):
         # Resolve row_text + font_text without any extra async DOM call when
@@ -2034,17 +2038,19 @@ async def nodriver_get_tixcraft_target_area(el, config_dict, area_keyword_item):
                 debug.log(f"[AREA SMART]   Remaining {remaining_count} < requested {requested}, skipping")
                 continue
             area_price = util.parse_price_from_area_text(row_text)
-            # Only enforce price filter if user actually set one. If price_ranges
-            # is empty -> "no limit", price unknown is OK. Otherwise we need a
-            # parseable price to verify membership.
-            if price_ranges:
-                if not util.is_price_in_filter(area_price, price_ranges):
-                    debug.log(f"[AREA SMART]   Price {area_price} outside filter {price_ranges}, skipping")
-                    continue
-            debug.log(f"[AREA SMART]   PASS price={area_price} remaining={remaining_count} font='{font_text.strip()}'")
+            # Match against the priority tiers. If price_tiers is empty
+            # (no filter set) every candidate goes to tier 0. Otherwise
+            # find the first tier the price falls into; None = no match,
+            # skip the candidate entirely.
+            tier_idx = util.find_price_tier_index(area_price, price_tiers)
+            if price_tiers and tier_idx is None:
+                debug.log(f"[AREA SMART]   Price {area_price} matches no tier of {price_tiers}, skipping")
+                continue
+            debug.log(f"[AREA SMART]   PASS price={area_price} remaining={remaining_count} tier={tier_idx} font='{font_text.strip()}'")
             matched_blocks.append(row)
             smart_remaining_counts.append(remaining_count)
             smart_prices.append(area_price if area_price is not None else 0)
+            smart_tier_indices.append(tier_idx if tier_idx is not None else 0)
             # Don't break; collect all so we can sort by remaining count after the loop.
             continue
 
@@ -2071,8 +2077,21 @@ async def nodriver_get_tixcraft_target_area(el, config_dict, area_keyword_item):
     # util.get_target_index_by_mode returns 0 for our unknown mode value,
     # so picking index 0 from the pre-sorted list gives the right element.
     if is_smart_mode and matched_blocks:
-        # Tag each matched row with (remaining, price, original_index) for sorting.
-        bundle = list(zip(matched_blocks, smart_remaining_counts, smart_prices, range(len(matched_blocks))))
+        # Tag each matched row with (remaining, price, original_index, tier) for sorting.
+        bundle = list(zip(matched_blocks, smart_remaining_counts, smart_prices,
+                          range(len(matched_blocks)), smart_tier_indices))
+
+        # Tiered priority pre-filter: ``>``-separated entries split the
+        # candidate pool into priority tiers. We pick the lowest-index
+        # tier that has ANY candidates, then drop everything from worse
+        # tiers — they only get a chance if better tiers are exhausted.
+        if price_tiers and len(price_tiers) > 1 and bundle:
+            best_tier = min(item[4] for item in bundle)
+            before = len(bundle)
+            bundle = [item for item in bundle if item[4] == best_tier]
+            debug.log(f"[AREA SMART] Priority tier {best_tier} chosen "
+                      f"({len(bundle)}/{before} candidates kept; "
+                      f"worse tiers held in reserve)")
 
         rank_shift = 0   # how many leading elements to drop after sorting
         legacy_min = (smart_sort_priority == util.CONST_SMART_SORT_MIN_REMAINING_LEGACY)
@@ -2119,9 +2138,11 @@ async def nodriver_get_tixcraft_target_area(el, config_dict, area_keyword_item):
         if rank_shift > 0:
             bundle = bundle[rank_shift:]
 
-        matched_blocks = [r for r, _, _, _ in bundle]
+        matched_blocks = [item[0] for item in bundle]
         if debug.enabled:
-            preview = ", ".join(f"(remain={r},price={p})" for _, r, p, _ in bundle[:5])
+            preview = ", ".join(
+                f"(remain={item[1]},price={item[2]},tier={item[4]})" for item in bundle[:5]
+            )
             debug.log(f"[AREA SMART] Sorted {len(matched_blocks)} areas by {sort_label}. Top: {preview}")
 
     if not matched_blocks:

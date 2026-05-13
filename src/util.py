@@ -2283,30 +2283,55 @@ def parse_price_input(text):
         return None
 
 
-def parse_price_filter_spec(text):
-    """Parse a user-typed price filter into a list of (lo, hi) ranges.
+def _parse_single_price_range(piece):
+    """Parse one ``-`` range / single price into (lo, hi). None if invalid.
 
-    Empty inputs return ``[]``, which callers should treat as "no limit".
-    Each piece is one of:
-        - ``"4480"``           -> ``(4480, 4480)`` (exact)
-        - ``"4480-6680"``      -> ``(4480, 6680)`` (range)
-        - ``"-5000"``          -> ``(None, 5000)`` (max only)
-        - ``"4480-"``          -> ``(4480, None)`` (min only)
+    Ranges auto-swap so ``"4380-3880"`` and ``"3880-4380"`` both produce
+    the same ``(3880, 4380)`` — the dash is a range separator, not a
+    direction indicator.
+    """
+    piece = piece.strip()
+    if not piece:
+        return None
+    if '-' in piece:
+        lo_str, hi_str = piece.split('-', 1)
+        lo = parse_price_input(lo_str)
+        hi = parse_price_input(hi_str)
+        if lo is None and hi is None:
+            return None
+        # Auto-swap reversed ranges so writing order doesn't matter.
+        if lo is not None and hi is not None and lo > hi:
+            lo, hi = hi, lo
+        return (lo, hi)
+    v = parse_price_input(piece)
+    if v is None:
+        return None
+    return (v, v)
 
-    Multiple pieces are separated by ``;`` and combined with OR semantics.
-    Numbers may include thousands separators (``"4,480"``) — they are
-    stripped by parse_price_input. Whitespace is tolerant.
+
+def parse_price_filter_tiered_spec(text):
+    """Parse a price filter into priority tiers (the new ``>`` syntax).
+
+    Outer list = priority tiers, evaluated in order. Inner list = OR
+    alternatives within a tier. Each alternative is one ``(lo, hi)``
+    range tuple, with bounds auto-swapped if the user wrote them
+    descending.
+
+    Precedence: ``;`` binds tighter than ``>`` (like ``*`` vs ``+``),
+    so ``"A>B;C"`` is read as ``[[A], [B, C]]`` — first try A; if A has
+    nothing, fall back to "B or C".
 
     Examples:
-        ""                              -> []
-        "4480"                          -> [(4480, 4480)]
-        "4,480"                         -> [(4480, 4480)]
-        "4480;6680"                     -> [(4480, 4480), (6680, 6680)]
-        "4480-6680"                     -> [(4480, 6680)]
-        "-5000;7000-9000"               -> [(None, 5000), (7000, 9000)]
-        "garbage"                       -> []  (silently dropped)
+        ""                  -> []
+        "4380"              -> [[(4380, 4380)]]
+        "4380;3880"         -> [[(4380, 4380), (3880, 3880)]]              # one tier, OR
+        "4380>3880"         -> [[(4380, 4380)], [(3880, 3880)]]            # two tiers
+        "4380>3880;5500"    -> [[(4380, 4380)], [(3880, 3880), (5500, 5500)]]
+        "4380-3880"         -> [[(3880, 4380)]]                            # auto-swap
+        "3880-4380"         -> [[(3880, 4380)]]                            # same
+        ">>;;4380;;"        -> [[(4380, 4380)]]                            # empties dropped
 
-    Never raises.
+    Empty result == "no filter". Never raises.
     """
     try:
         if text is None:
@@ -2314,26 +2339,69 @@ def parse_price_filter_spec(text):
         s = str(text).strip()
         if not s:
             return []
-        ranges = []
-        for piece in s.split(';'):
-            piece = piece.strip()
-            if not piece:
-                continue
-            if '-' in piece:
-                lo_str, hi_str = piece.split('-', 1)
-                lo = parse_price_input(lo_str)
-                hi = parse_price_input(hi_str)
-                # Skip if both ends are None (e.g., bare "-")
-                if lo is None and hi is None:
-                    continue
-                ranges.append((lo, hi))
-            else:
-                v = parse_price_input(piece)
-                if v is not None:
-                    ranges.append((v, v))
-        return ranges
+        tiers = []
+        for tier_text in s.split('>'):
+            tier_ranges = []
+            for piece in tier_text.split(';'):
+                rng = _parse_single_price_range(piece)
+                if rng is not None:
+                    tier_ranges.append(rng)
+            if tier_ranges:
+                tiers.append(tier_ranges)
+        return tiers
     except Exception:
         return []
+
+
+def find_price_tier_index(price, tiers):
+    """Return the 0-indexed first tier that ``price`` falls into.
+
+    Returns ``None`` when the price matches no tier (or price is None
+    and there's at least one tier to match against). Returns ``0`` when
+    ``tiers`` is empty (no filter at all -> everyone in the same tier).
+
+    Never raises.
+    """
+    try:
+        if not tiers:
+            return 0
+        if price is None:
+            return None
+        for i, tier in enumerate(tiers):
+            for lo, hi in tier:
+                if lo is not None and price < lo:
+                    continue
+                if hi is not None and price > hi:
+                    continue
+                return i
+        return None
+    except Exception:
+        return None
+
+
+def parse_price_filter_spec(text):
+    """Backward-compat wrapper: flatten tiered spec to a single list.
+
+    Older call sites only need "is this price acceptable at all" (OR
+    semantics across the full filter); they don't care about tiers.
+    This wrapper preserves their behaviour while the rest of the code
+    moves to ``parse_price_filter_tiered_spec``.
+
+    Examples (post auto-swap):
+        ""              -> []
+        "4480"          -> [(4480, 4480)]
+        "4480;6680"     -> [(4480, 4480), (6680, 6680)]
+        "4480-6680"     -> [(4480, 6680)]
+        "4380-3880"     -> [(3880, 4380)]                # auto-swapped
+        "4380>3880"     -> [(4380, 4380), (3880, 3880)]  # tiers flattened
+        "-5000;7000-9000" -> [(None, 5000), (7000, 9000)]
+
+    Never raises.
+    """
+    flat = []
+    for tier in parse_price_filter_tiered_spec(text):
+        flat.extend(tier)
+    return flat
 
 
 def is_price_in_filter(price, ranges):
