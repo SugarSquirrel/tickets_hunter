@@ -368,6 +368,47 @@ def reset_json():
     config_dict = get_default_config()
     return config_filepath, config_dict
 
+# Every bot subprocess we launch is tracked here so "結束" can actually
+# stop them. Without this the GUI just exits and orphans the bots,
+# leaving the user wondering why the search keeps going.
+_RUNNING_BOT_PROCESSES = []
+
+
+def _track_bot_process(proc):
+    """Callback for util.launch_maxbot: remember each spawned subprocess."""
+    try:
+        if proc is not None:
+            _RUNNING_BOT_PROCESSES.append(proc)
+    except Exception:
+        pass
+
+
+def shutdown_all_bots():
+    """Terminate every bot subprocess we spawned, gracefully then forcefully.
+
+    Tries ``terminate()`` first so the child gets a chance to run its
+    atexit hooks (which clean up the zendriver browser). Anything still
+    alive after a short grace period is ``kill()``-ed outright. Idempotent.
+    """
+    alive = [p for p in _RUNNING_BOT_PROCESSES if p is not None and p.poll() is None]
+    if not alive:
+        return
+    print(f"[SHUTDOWN] Terminating {len(alive)} bot subprocess(es)...")
+    for p in alive:
+        try:
+            p.terminate()
+        except Exception as exc:
+            print(f"[SHUTDOWN] terminate() failed for pid={getattr(p, 'pid', '?')}: {exc}")
+    # Brief grace for atexit cleanup (browser teardown), then force kill stragglers.
+    time.sleep(1.0)
+    for p in alive:
+        try:
+            if p.poll() is None:
+                p.kill()
+        except Exception:
+            pass
+
+
 def maxbot_idle():
     app_root = util.get_app_root()
     idle_filepath = os.path.join(app_root, CONST_MAXBOT_INT28_FILE)
@@ -406,7 +447,11 @@ def launch_maxbot():
             window_size = window_size + "," + str(launch_counter)
             #print("window_size:", window_size)
 
-    threading.Thread(target=util.launch_maxbot, args=(script_name,"","","","",window_size,)).start()
+    threading.Thread(
+        target=util.launch_maxbot,
+        args=(script_name, "", "", "", "", window_size,),
+        kwargs={"on_spawned": _track_bot_process},
+    ).start()
 
 def change_maxbot_status_by_keyword():
     config_filepath, config_dict = load_json()
@@ -495,6 +540,13 @@ class VersionHandler(tornado.web.RequestHandler):
 class ShutdownHandler(tornado.web.RequestHandler):
     def get(self):
         global GLOBAL_SERVER_SHUTDOWN
+        # Terminate any bot subprocess we still have a handle on BEFORE
+        # signalling the GUI to exit, otherwise the bots are orphaned
+        # and the user sees the browser keep refreshing forever.
+        try:
+            shutdown_all_bots()
+        except Exception as exc:
+            print(f"[SHUTDOWN] shutdown_all_bots() failed: {exc}")
         GLOBAL_SERVER_SHUTDOWN = True
         self.write({"showdown": GLOBAL_SERVER_SHUTDOWN})
 
@@ -1145,8 +1197,20 @@ if __name__ == "__main__":
     clean_tmp_file()
 
     print("To exit web server press Ctrl + C.")
-    while True:
-        time.sleep(0.4)
-        if GLOBAL_SERVER_SHUTDOWN:
-            break
+    try:
+        while True:
+            time.sleep(0.4)
+            if GLOBAL_SERVER_SHUTDOWN:
+                break
+    except KeyboardInterrupt:
+        # Ctrl+C path -- still tear bots down before exiting.
+        pass
+    # Defensive: even if ShutdownHandler already cleaned up, this is a no-op
+    # on processes that already exited. Catches the Ctrl+C exit and any
+    # other path that flips the shutdown flag without going through the
+    # handler.
+    try:
+        shutdown_all_bots()
+    except Exception as exc:
+        print(f"[SHUTDOWN] final shutdown_all_bots() failed: {exc}")
     print("Bye bye, see you next time.")

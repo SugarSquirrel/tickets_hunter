@@ -2095,7 +2095,17 @@ def kktix_get_event_code(url):
     #print('event_code:',event_code)
     return event_code
 
-def launch_maxbot(script_name="nodriver_tixcraft", filename="", homepage="", kktix_account = "", kktix_password="", window_size="", headless=""):
+def launch_maxbot(script_name="nodriver_tixcraft", filename="", homepage="", kktix_account = "", kktix_password="", window_size="", headless="", on_spawned=None):
+    """Spawn the bot as a child process.
+
+    ``on_spawned`` (optional) is called with the resulting ``subprocess.Popen``
+    object right after spawn so the caller can track it for later
+    termination — without this hook the child is orphaned and the
+    settings GUI's "結束" button has no way to stop it.
+
+    Never raises — the spawn is wrapped in try/except and a failure just
+    skips the callback (caller sees nothing was tracked).
+    """
     cmd_argument = []
     if len(filename) > 0:
         cmd_argument.append('--input=' + filename)
@@ -2122,7 +2132,15 @@ def launch_maxbot(script_name="nodriver_tixcraft", filename="", homepage="", kkt
         if platform.system() == 'Windows':
             print("execute .exe binary.")
             cmd = script_name + '.exe ' + ' '.join(cmd_argument)
-        subprocess.Popen(cmd, shell=True, cwd=working_dir)
+        try:
+            proc = subprocess.Popen(cmd, shell=True, cwd=working_dir)
+            if on_spawned is not None:
+                try:
+                    on_spawned(proc)
+                except Exception:
+                    pass
+        except Exception as exc:
+            print("exeption (frozen launch):", exc)
     else:
         interpreter_binary = sys.executable
         print("execute in shell mode.")
@@ -2130,7 +2148,12 @@ def launch_maxbot(script_name="nodriver_tixcraft", filename="", homepage="", kkt
         try:
             print('try', interpreter_binary)
             cmd_array = [interpreter_binary, script_name + '.py'] + cmd_argument
-            s=subprocess.Popen(cmd_array, cwd=working_dir)
+            s = subprocess.Popen(cmd_array, cwd=working_dir)
+            if on_spawned is not None:
+                try:
+                    on_spawned(s)
+                except Exception:
+                    pass
         except Exception as exc:
             msg=str(exc)
             print("exeption:", msg)
