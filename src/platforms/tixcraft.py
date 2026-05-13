@@ -1855,8 +1855,7 @@ async def nodriver_get_tixcraft_target_area(el, config_dict, area_keyword_item):
 
     # Smart mode: parse price filter spec + sort priority up front.
     is_smart_mode = (area_auto_select_mode == util.CONST_PRICE_RANGE_MAX_REMAINING)
-    price_ranges = []
-    smart_sort_priority = util.CONST_SMART_SORT_MAX_REMAINING
+    smart_sort_priority = util.CONST_SMART_SORT_REMAINING_RANK
     price_tiers = []
     if is_smart_mode:
         price_tiers = util.parse_price_filter_tiered_spec(
