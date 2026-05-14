@@ -2280,6 +2280,48 @@ def build_notification_context(stage, platform_name, **overrides):
         return {key: "" for key in _NOTIFICATION_PLACEHOLDER_KEYS}
 
 
+async def humanize_sleep(min_s, max_s, config_dict=None):
+    """Random sleep in [min_s, max_s] seconds, scaled by user-configurable
+    speed multiplier.
+
+    The bot has multiple "look human" sleeps along the grab-to-submit
+    path (between captcha attempts, after captcha reload, etc.). When
+    the user is OK with going fast at the cost of detection risk, they
+    can lower advanced.action_speed_multiplier in settings.json:
+
+      1.0  -> default, current behaviour
+      0.5  -> half the wait time everywhere
+      0.0  -> instant (no humanize delay; high anti-bot risk)
+      2.0  -> double the wait time (safer, slower)
+
+    Never raises. Falls back to 1.0 multiplier on any config issue.
+    """
+    import asyncio
+    try:
+        multiplier = 1.0
+        if config_dict is not None:
+            raw = config_dict.get("advanced", {}).get("action_speed_multiplier", 1.0)
+            try:
+                multiplier = float(raw)
+            except (TypeError, ValueError):
+                multiplier = 1.0
+            if multiplier < 0:
+                multiplier = 0.0
+        # Snap to instant if the multiplier zeros the delay entirely.
+        scaled_min = max(0.0, float(min_s) * multiplier)
+        scaled_max = max(scaled_min, float(max_s) * multiplier)
+        if scaled_max <= 0:
+            return
+        await asyncio.sleep(random.uniform(scaled_min, scaled_max))
+    except Exception:
+        # If anything goes wrong, fall back to the original behaviour so
+        # the bot never hangs forever on a malformed sleep call.
+        try:
+            await asyncio.sleep(random.uniform(float(min_s), float(max_s)))
+        except Exception:
+            pass
+
+
 def parse_price_input(text):
     """Normalize a user-entered price string into an int.
 

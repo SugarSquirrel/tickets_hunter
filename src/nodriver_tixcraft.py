@@ -586,7 +586,8 @@ async def reload_config(config_dict, last_mtime):
                         "auto_reload_overheat_count", "auto_reload_overheat_cd",
                         "idle_keyword", "resume_keyword", "idle_keyword_second", "resume_keyword_second",
                         "discord_webhook_url", "telegram_bot_token", "telegram_chat_id",
-                        "discount_code"
+                        "discount_code",
+                        "action_speed_multiplier",
                     ]
                     for field in adv_fields:
                         if field in new_config["advanced"]:

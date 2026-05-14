@@ -1012,7 +1012,7 @@ async def nodriver_ticketmaster_captcha(tab, config_dict, ocr, captcha_browser):
         fail_count = 0
         total_fail_count = 0
 
-        await asyncio.sleep(random.uniform(0.5, 1.0))
+        await util.humanize_sleep(0.5, 1.0, config_dict)
 
         for redo_ocr in range(99):
             try:
@@ -1056,7 +1056,7 @@ async def nodriver_ticketmaster_captcha(tab, config_dict, ocr, captcha_browser):
                             await nodriver_tixcraft_keyin_captcha_code(tab, config_dict=config_dict)
                             break
 
-                        await asyncio.sleep(random.uniform(0.5, 1.0))
+                        await util.humanize_sleep(0.5, 1.0, config_dict)
                         continue
 
                     # Check for Ticketmaster custom error modal (not native alert)
@@ -1159,7 +1159,7 @@ async def nodriver_ticketmaster_captcha(tab, config_dict, ocr, captcha_browser):
                                 await nodriver_tixcraft_keyin_captcha_code(tab, config_dict=config_dict)
                                 break
 
-                            await asyncio.sleep(random.uniform(0.5, 1.0))
+                            await util.humanize_sleep(0.5, 1.0, config_dict)
                             continue  # Retry OCR
 
                     except Exception as modal_exc:
@@ -1193,10 +1193,10 @@ async def nodriver_ticketmaster_captcha(tab, config_dict, ocr, captcha_browser):
                     await nodriver_tixcraft_reload_captcha(tab, domain_name)
                     fail_count = 0
                     previous_answer = None  # Reset to allow fresh OCR
-                    await asyncio.sleep(random.uniform(0.8, 1.2))  # Wait for new captcha to load
+                    await util.humanize_sleep(0.8, 1.2, config_dict)  # Wait for new captcha to load
                 else:
                     # Wait between retries to allow canvas to fully load
-                    await asyncio.sleep(random.uniform(0.3, 0.5))
+                    await util.humanize_sleep(0.3, 0.5, config_dict)
 
                 # Check if URL changed
                 new_url = tab.target.url
@@ -1881,6 +1881,16 @@ async def nodriver_get_tixcraft_target_area(tab, el, config_dict, area_keyword_i
         debug.log(f"[AREA SMART] Sort priority: {smart_sort_priority}")
         if smart_sort_priority == util.CONST_SMART_SORT_REMAINING_RANK:
             debug.log(f"[AREA SMART] Rank: direction={rank_direction}, n={rank_n}")
+    else:
+        # Make it crystal clear in the log that smart-only filters (price,
+        # sort priority, rank) are NOT being applied — saves the user from
+        # second-guessing whether a stale price_filter setting is still
+        # affecting them when they switched the mode dropdown.
+        debug.log(
+            f"[AREA KEYWORD] Smart filters OFF in mode '{area_auto_select_mode}': "
+            f"price_filter / sort_priority / rank are IGNORED. "
+            f"Only area_keyword + exclude_keyword apply, with strict substring matching."
+        )
 
     # ===================================================================
     # FAST PATH: a single round-trip to the page that returns text + font

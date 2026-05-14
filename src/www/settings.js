@@ -67,6 +67,7 @@ const auto_press_next_step_button = document.querySelector('#auto_press_next_ste
 const max_dwell_time = document.querySelector('#max_dwell_time');
 
 const auto_reload_page_interval = document.querySelector('#auto_reload_page_interval');
+const action_speed_multiplier = document.querySelector('#action_speed_multiplier');
 const reset_browser_interval = document.querySelector('#reset_browser_interval');
 const server_port = document.querySelector('#server_port');
 const proxy_server_port = document.querySelector('#proxy_server_port');
@@ -311,6 +312,10 @@ function load_settins_to_form(settings)
         max_dwell_time.value = settings.kktix.max_dwell_time;
 
         auto_reload_page_interval.value = settings.advanced.auto_reload_page_interval;
+        if (action_speed_multiplier) {
+            const mult = settings.advanced.action_speed_multiplier;
+            action_speed_multiplier.value = (mult === undefined || mult === null) ? 1.0 : mult;
+        }
         reset_browser_interval.value = settings.advanced.reset_browser_interval;
         server_port.value = settings.advanced.server_port || 16888;
         proxy_server_port.value  = settings.advanced.proxy_server_port;
@@ -577,6 +582,10 @@ function save_changes_to_dict(silent_flag)
             settings.kktix.max_dwell_time = parseInt(max_dwell_time.value);
 
             settings.advanced.auto_reload_page_interval = Number(auto_reload_page_interval.value);
+            if (action_speed_multiplier) {
+                const raw = parseFloat(action_speed_multiplier.value);
+                settings.advanced.action_speed_multiplier = (Number.isFinite(raw) && raw >= 0) ? raw : 1.0;
+            }
             settings.advanced.reset_browser_interval = parseInt(reset_browser_interval.value);
             settings.advanced.server_port = parseInt(server_port.value) || 16888;
             settings.advanced.proxy_server_port = proxy_server_port.value;
