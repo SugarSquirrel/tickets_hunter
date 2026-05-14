@@ -689,12 +689,12 @@ async def nodriver_ticketmaster_date_auto_select(tab, config_dict):
                 debug.log("[TICKETMASTER DATE] Clicked 'See Tickets' link")
 
                 # Handle new tab (close if opened)
-                await tab.sleep(0.3)
+                await util.humanize_sleep(0.3, 0.3, config_dict)
                 if len(tab.browser.tabs) > 1:
                     # Close extra tabs
                     for extra_tab in tab.browser.tabs[1:]:
                         await extra_tab.close()
-                    await tab.sleep(0.2)
+                    await util.humanize_sleep(0.2, 0.2, config_dict)
 
         except Exception as exc:
             debug.log(f"[TICKETMASTER DATE] Failed to click link: {exc}")
@@ -704,7 +704,7 @@ async def nodriver_ticketmaster_date_auto_select(tab, config_dict):
         debug.log("[TICKETMASTER DATE] No dates available, reloading page...")
         try:
             await tab.reload()
-            await tab.sleep(0.3)
+            await util.humanize_sleep(0.3, 0.3, config_dict)
         except:
             pass
 
