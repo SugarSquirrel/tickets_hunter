@@ -726,9 +726,14 @@ async def main(args):
 
         is_maxbot_paused = await check_and_handle_pause(config_dict)
 
-        # Detect pause state change and show message immediately
+        # Detect pause state change and show message immediately.
+        # Tag with the process PID so if the user has multiple bot
+        # subprocesses running concurrently (e.g. they launched 搶票
+        # multiple times), they see "[pid=12345] BOT Paused." × N and
+        # can spot the duplicates instantly instead of wondering why
+        # the same line appears 3 times in one second.
         if is_maxbot_paused and not last_paused_state:
-            print("BOT Paused.")
+            print(f"[pid={os.getpid()}] BOT Paused.")
         last_paused_state = is_maxbot_paused
 
         if len(url) > 0 :

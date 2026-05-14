@@ -1746,7 +1746,7 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
         for keyword_index, area_keyword_item in enumerate(area_keyword_array):
             debug.log(f"[AREA KEYWORD] Checking keyword #{keyword_index + 1}: {area_keyword_item}")
 
-            is_need_refresh, matched_blocks = await nodriver_get_tixcraft_target_area(el, config_dict, area_keyword_item)
+            is_need_refresh, matched_blocks = await nodriver_get_tixcraft_target_area(tab, el, config_dict, area_keyword_item)
 
             if not is_need_refresh:
                 # T013: Keyword matched log
@@ -1765,7 +1765,7 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
                 # T022: Fallback enabled - use auto_select_mode without keyword
                 debug.log(f"[AREA FALLBACK] area_auto_fallback=true, triggering auto fallback")
                 debug.log(f"[AREA FALLBACK] Selecting available area based on area_select_order='{auto_select_mode}'")
-                is_need_refresh, matched_blocks = await nodriver_get_tixcraft_target_area(el, config_dict, "")
+                is_need_refresh, matched_blocks = await nodriver_get_tixcraft_target_area(tab, el, config_dict, "")
                 is_fallback_selection = True  # Mark as fallback selection
             else:
                 # T023: Fallback disabled - strict mode (no selection, but still reload)
@@ -1775,7 +1775,7 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
                 # matched_blocks remains None (no selection will be made)
                 # is_need_refresh remains True (will trigger reload)
     else:
-        is_need_refresh, matched_blocks = await nodriver_get_tixcraft_target_area(el, config_dict, "")
+        is_need_refresh, matched_blocks = await nodriver_get_tixcraft_target_area(tab, el, config_dict, "")
         # No keyword specified, treat as mode-based selection (similar to fallback)
         if not area_keyword:
             is_fallback_selection = True
@@ -1830,7 +1830,7 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
         except Exception:
             pass
 
-async def nodriver_get_tixcraft_target_area(el, config_dict, area_keyword_item):
+async def nodriver_get_tixcraft_target_area(tab, el, config_dict, area_keyword_item):
     area_auto_select_mode = config_dict["area_auto_select"]["mode"]
     debug = util.create_debug_logger(config_dict)
     is_need_refresh = False
@@ -1888,21 +1888,25 @@ async def nodriver_get_tixcraft_target_area(el, config_dict, area_keyword_item):
     # get_html + one font query per row), which dominated the scan time.
     # Now scan time scales as O(1) DOM calls + O(N) Python work.
     #
-    # Implementation note: zendriver's evaluate() is unreliable when the
-    # JS returns a native Array (got 'NoneType' object is not callable
-    # when the wrapper tried to convert it). Returning a JSON STRING and
-    # parsing it Python-side is the safest contract — strings always
-    # round-trip cleanly through the CDP layer.
+    # Implementation note: zendriver's element-level ``el.evaluate(...)``
+    # path is broken — even with JSON.stringify it raises
+    # ``'NoneType' object is not callable`` somewhere in the result
+    # marshalling. ``tab.evaluate(...)`` works reliably, so we run the
+    # query against the global document instead of the bound element.
     # ===================================================================
     batch_data = None
     try:
-        batch_json = await el.evaluate('''
-            el => JSON.stringify(
-                Array.from(el.querySelectorAll("a")).map(function(a) {
-                    var font = a.querySelector("font");
-                    return [a.textContent || "", font ? (font.textContent || "") : ""];
-                })
-            )
+        batch_json = await tab.evaluate('''
+            (function() {
+                var zone = document.querySelector('.zone');
+                if (!zone) return JSON.stringify([]);
+                return JSON.stringify(
+                    Array.from(zone.querySelectorAll('a')).map(function(a) {
+                        var font = a.querySelector('font');
+                        return [a.textContent || '', font ? (font.textContent || '') : ''];
+                    })
+                );
+            })()
         ''')
         if batch_json:
             import json as _json
