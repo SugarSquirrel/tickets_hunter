@@ -69,6 +69,7 @@ const max_dwell_time = document.querySelector('#max_dwell_time');
 const auto_reload_page_interval = document.querySelector('#auto_reload_page_interval');
 const action_speed_multiplier = document.querySelector('#action_speed_multiplier');
 const ocr_retry_cooldown = document.querySelector('#ocr_retry_cooldown');
+const post_submit_reload_guard_seconds = document.querySelector('#post_submit_reload_guard_seconds');
 const show_timing_log = document.querySelector('#show_timing_log');
 const reset_browser_interval = document.querySelector('#reset_browser_interval');
 const server_port = document.querySelector('#server_port');
@@ -321,6 +322,10 @@ function load_settins_to_form(settings)
         if (ocr_retry_cooldown) {
             const cool = settings.advanced.ocr_retry_cooldown;
             ocr_retry_cooldown.value = (cool === undefined || cool === null) ? 2.5 : cool;
+        }
+        if (post_submit_reload_guard_seconds) {
+            const v = settings.advanced.post_submit_reload_guard_seconds;
+            post_submit_reload_guard_seconds.value = (v === undefined || v === null) ? 15 : v;
         }
         if (show_timing_log) {
             const flag = settings.advanced.show_timing_log;
@@ -599,6 +604,10 @@ function save_changes_to_dict(silent_flag)
             if (ocr_retry_cooldown) {
                 const raw = parseFloat(ocr_retry_cooldown.value);
                 settings.advanced.ocr_retry_cooldown = (Number.isFinite(raw) && raw >= 0 && raw <= 60) ? raw : 2.5;
+            }
+            if (post_submit_reload_guard_seconds) {
+                const raw = parseFloat(post_submit_reload_guard_seconds.value);
+                settings.advanced.post_submit_reload_guard_seconds = (Number.isFinite(raw) && raw >= 0 && raw <= 120) ? raw : 15.0;
             }
             if (show_timing_log) {
                 settings.advanced.show_timing_log = !!show_timing_log.checked;

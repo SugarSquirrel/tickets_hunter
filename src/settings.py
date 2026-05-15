@@ -220,6 +220,9 @@ def get_default_config():
     # Wait seconds after 3 consecutive OCR failures before retrying (Task ⑦).
     # Range 0.0-60.0; non-numeric falls back to default 2.5.
     config_dict["advanced"]["ocr_retry_cooldown"] = 2.5
+    # After form submission, suppress reload for this many seconds so the
+    # server's natural redirect isn't pre-empted (Bug 1.5-ⓐ).
+    config_dict["advanced"]["post_submit_reload_guard_seconds"] = 15.0
     config_dict["advanced"]["reset_browser_interval"] = 0
     config_dict["advanced"]["proxy_server_port"] = ""
     config_dict["advanced"]["window_size"] = "600,1024"
@@ -327,6 +330,7 @@ def migrate_config(config_dict):
     if "advanced" in config_dict and isinstance(config_dict["advanced"], dict):
         config_dict["advanced"].setdefault("show_timing_log", True)
         config_dict["advanced"].setdefault("ocr_retry_cooldown", 2.5)
+        config_dict["advanced"].setdefault("post_submit_reload_guard_seconds", 15.0)
 
     # Ensure all default fields exist (fills missing keys from new versions)
     default = get_default_config()

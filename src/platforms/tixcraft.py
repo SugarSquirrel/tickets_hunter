@@ -2297,27 +2297,74 @@ async def nodriver_tixcraft_assign_ticket_number(tab, config_dict):
     except:
         pass  # Continue even if timeout, will try to find selectors below
 
-    # 查找票券選擇器
-    form_select_list = []
+    # PERF (Bug 1.5-ⓒ): batch-evaluate all selects + options + parent row text in
+    # ONE tab.evaluate() call, replacing N per-element .update() / query_selector
+    # round-trips (~10-50ms each). select_obj is no longer needed downstream.
+    import json
+    batch_js = """
+    (function() {
+        var selects = document.querySelectorAll('.mobile-select');
+        if (selects.length === 0) {
+            selects = document.querySelectorAll('select[id*="TicketForm_ticketPrice_"]');
+        }
+        var out = [];
+        for (var i = 0; i < selects.length; i++) {
+            var s = selects[i];
+            var opts = [];
+            for (var j = 0; j < s.options.length; j++) {
+                var o = s.options[j];
+                opts.push({
+                    value: o.value,
+                    text: (o.textContent || '').trim(),
+                    disabled: !!o.disabled
+                });
+            }
+            var parent = s.parentElement;
+            var depth = 0;
+            while (parent && parent.tagName && parent.tagName.toLowerCase() !== 'tr' && depth < 5) {
+                parent = parent.parentElement;
+                depth++;
+            }
+            var name = '';
+            if (parent && parent.tagName && parent.tagName.toLowerCase() === 'tr') {
+                var h4 = parent.querySelector('h4');
+                if (h4) {
+                    name = (h4.textContent || '').trim();
+                } else {
+                    var td = parent.querySelector('td.fcBlue');
+                    if (td) name = (td.textContent || '').trim();
+                }
+            }
+            out.push({
+                id: s.id || ('select_' + i),
+                disabled: !!s.disabled,
+                options: opts,
+                name: name,
+                currentValue: s.value || ''
+            });
+        }
+        return JSON.stringify(out);
+    })();
+    """
+
+    selects_data = []
     try:
-        form_select_list = await tab.query_selector_all('.mobile-select')
+        raw = await tab.evaluate(batch_js)
+        raw = util.parse_nodriver_result(raw)
+        if isinstance(raw, str):
+            selects_data = json.loads(raw)
+        elif isinstance(raw, list):
+            selects_data = raw
     except Exception as exc:
-        debug.log("Failed to find .mobile-select")
+        debug.log(f"[TICKET SELECT] Batch evaluate failed: {exc}")
+        selects_data = []
 
-    # 如果沒找到 .mobile-select，嘗試其他選擇器
-    if len(form_select_list) == 0:
-        try:
-            form_select_list = await tab.query_selector_all('select[id*="TicketForm_ticketPrice_"]')
-        except Exception as exc:
-            debug.log("Failed to find ticket selector")
-
-    form_select_count = len(form_select_list)
+    form_select_count = len(selects_data)
 
     if form_select_count > 0:
         debug.log(f"[TICKET SELECT] Found {form_select_count} select element(s)")
 
     # Get area keyword configuration
-    import json
     area_keyword = config_dict["area_auto_select"]["area_keyword"].strip()
     area_auto_fallback = config_dict.get('area_auto_fallback', False)
     auto_select_mode = config_dict["area_auto_select"]["mode"]
@@ -2331,89 +2378,40 @@ async def nodriver_tixcraft_assign_ticket_number(tab, config_dict):
     valid_ticket_types = []
     sold_out_keywords = ["選購一空", "已售完", "Sold out", "No tickets available", "空席なし", "完売した"]
 
-    # 使用 NoDriver Element API 檢查每個 select 元素
-    for idx, select_element in enumerate(form_select_list):
-        try:
-            # 更新元素以確保屬性載入
-            await select_element.update()
+    for idx, sd in enumerate(selects_data):
+        select_id = sd.get('id', f'select_{idx}')
 
-            # 檢查 select 是否 disabled
-            select_attrs = select_element.attrs or {}
-            select_id = select_attrs.get('id', f'select_{idx}')
-            is_select_disabled = 'disabled' in select_attrs
+        if sd.get('disabled', False):
+            debug.log(f"[TICKET SELECT] Skipping disabled select: {select_id}")
+            continue
 
-            if is_select_disabled:
-                debug.log(f"[TICKET SELECT] Skipping disabled select: {select_id}")
-                continue
+        has_valid_option = False
+        for opt in sd.get('options', []):
+            opt_value = opt.get('value', '')
+            opt_text = opt.get('text', '')
+            opt_disabled = opt.get('disabled', False)
 
-            # 檢查 option 元素
-            option_elements = await select_element.query_selector_all('option')
-            has_valid_option = False
-            option_values = []
+            if (opt_value != "0" and
+                not opt_disabled and
+                opt_value not in sold_out_keywords and
+                opt_text not in sold_out_keywords):
+                has_valid_option = True
+                break
 
-            for option_element in option_elements:
-                try:
-                    await option_element.update()
-                    option_attrs = option_element.attrs or {}
-                    option_value = option_attrs.get('value', '')
-                    option_text = option_element.text or ''
-                    option_disabled = 'disabled' in option_attrs
+        if not has_valid_option:
+            debug.log(f"[TICKET SELECT] Skipping select (all options sold out or disabled): {select_id}")
+            continue
 
-                    option_values.append(option_value)
+        ticket_type_name = (sd.get('name', '') or '').strip()
 
-                    # 檢查是否為有效選項
-                    if (option_value != "0" and
-                        not option_disabled and
-                        option_value not in sold_out_keywords and
-                        option_text not in sold_out_keywords):
-                        has_valid_option = True
+        valid_ticket_types.append({
+            'id': select_id,
+            'name': ticket_type_name,
+            'index': idx,
+            'currentValue': sd.get('currentValue', ''),
+        })
 
-                except Exception as opt_exc:
-                    debug.log(f"[TICKET SELECT] Error checking option: {opt_exc}")
-                    continue
-
-            if not has_valid_option:
-                debug.log(f"[TICKET SELECT] Skipping select (all options sold out or disabled): {select_id}")
-                continue
-
-            # 嘗試獲取票種名稱（從父元素 <tr> 中的 <h4> 或 <td> 提取）
-            ticket_type_name = ""
-            try:
-                # 查找父元素 <tr>
-                parent_row = select_element
-                for _ in range(5):  # 最多向上查找 5 層
-                    parent_row = parent_row.parent
-                    if parent_row and parent_row.tag.lower() == 'tr':
-                        break
-
-                if parent_row and parent_row.tag.lower() == 'tr':
-                    # 嘗試找 <h4> 標籤
-                    h4_element = await parent_row.query_selector('h4')
-                    if h4_element:
-                        ticket_type_name = h4_element.text or ""
-                    else:
-                        # 嘗試找 <td class="fcBlue">
-                        td_element = await parent_row.query_selector('td.fcBlue')
-                        if td_element:
-                            ticket_type_name = td_element.text or ""
-
-                    ticket_type_name = ticket_type_name.strip()
-
-            except Exception as name_exc:
-                debug.log(f"[TICKET SELECT] Failed to extract ticket type name: {name_exc}")
-
-            # 加入 valid_ticket_types
-            valid_ticket_types.append({
-                'select': select_element,
-                'id': select_id,
-                'name': ticket_type_name,
-                'index': idx
-            })
-
-            debug.log(f"[TICKET SELECT] Valid ticket type: {select_id} - '{ticket_type_name}'")
-
-        except Exception as exc:
-            debug.log(f"[TICKET SELECT] Error checking select element: {exc}")
+        debug.log(f"[TICKET SELECT] Valid ticket type: {select_id} - '{ticket_type_name}'")
 
     debug.log(f"[TICKET SELECT] Valid ticket types: {len(valid_ticket_types)}/{form_select_count}")
 
@@ -2488,50 +2486,28 @@ async def nodriver_tixcraft_assign_ticket_number(tab, config_dict):
             if area_keyword_array:
                 debug.log(f"[TICKET SELECT] area_auto_fallback=true, using fallback selection")
 
-            # Select based on auto_select_mode
+            # Select based on auto_select_mode (pass ticket_info dicts directly)
             matched_ticket = util.get_target_item_from_matched_list(
-                [t['select'] for t in valid_ticket_types],
+                valid_ticket_types,
                 auto_select_mode
             )
-            # Find the ticket_info for the matched select
-            for ticket_info in valid_ticket_types:
-                if ticket_info['select'] == matched_ticket:
-                    matched_ticket = ticket_info
-                    break
 
             if matched_ticket:
                 selection_type = "fallback" if area_keyword_array else "mode-based"
                 debug.log(f"[TICKET SELECT] Selected ticket type ({selection_type}): '{matched_ticket['name']}'")
 
-    # Use the matched ticket select
-    select_obj = matched_ticket['select'] if matched_ticket else None
-    form_select_count = len(valid_ticket_types)
-
-    # Get select ID for JavaScript operations
+    # Get select ID for JavaScript operations (select_obj is no longer needed — Bug 1.5-ⓒ)
     select_id = matched_ticket['id'] if matched_ticket else None
 
-    # 檢查是否已經選擇了票券數量（非 "0"）
-    if select_id:
-        try:
-            # 使用 JavaScript 取得當前選中的值（使用正確的 select ID）
-            current_value = await tab.evaluate(f'''
-                (function() {{
-                    const select = document.getElementById('{select_id}');
-                    return select ? select.value : "0";
-                }})();
-            ''')
+    # 檢查是否已經選擇了票券數量（非 "0"）— 使用 batch 快取的 currentValue 省一次 CDP
+    if matched_ticket:
+        current_value = matched_ticket.get('currentValue', '')
+        if current_value and current_value != "0" and str(current_value).isnumeric():
+            is_ticket_number_assigned = True
+            debug.log(f"Ticket number already set to: {current_value}")
 
-            # 解析結果
-            current_value = util.parse_nodriver_result(current_value)
-
-            if current_value and current_value != "0" and str(current_value).isnumeric():
-                is_ticket_number_assigned = True
-                debug.log(f"Ticket number already set to: {current_value}")
-        except Exception as exc:
-            debug.log(f"Failed to check current selected value: {exc}")
-
-    # 回傳結果：select_obj 和 select_id 用於後續操作
-    return is_ticket_number_assigned, select_obj, select_id
+    # 回傳結果：select_obj 永遠為 None，下游用 select_id
+    return is_ticket_number_assigned, None, select_id
 
 async def nodriver_tixcraft_ticket_main_agree(tab, config_dict):
     debug = util.create_debug_logger(config_dict)
@@ -2559,6 +2535,21 @@ async def nodriver_tixcraft_ticket_main(tab, config_dict, ocr, Captcha_Browser, 
     current_url, _ = await nodriver_current_url(tab)
     ticket_number = str(config_dict["ticket_number"])
     ticket_state_key = f"ticket_assigned_{current_url}_{ticket_number}"
+
+    # PREHEAT (Bug 1.5-ⓑ): hint browser to fetch captcha image at high priority
+    # as soon as we enter the ticket page, before we even start ticket-select work.
+    # Fire-and-forget, deduped per URL via _state[preheat_key].
+    preheat_key = f"captcha_preheat_{current_url}"
+    if not _state.get(preheat_key, False):
+        _state[preheat_key] = True
+        try:
+            await tab.evaluate(
+                "(function(){var i=document.getElementById('TicketForm_verifyCode-image');"
+                "if(i){try{i.fetchPriority='high';}catch(e){}"
+                "try{i.setAttribute('fetchpriority','high');}catch(e){}}})();"
+            )
+        except Exception:
+            pass
 
     if ticket_state_key in _state and _state[ticket_state_key]:
         debug.log(f"Ticket number already set ({ticket_number}), skipping")
@@ -2596,6 +2587,23 @@ async def nodriver_tixcraft_ticket_main(tab, config_dict, ocr, Captcha_Browser, 
         debug.log("Ticket number set successfully, starting OCR captcha processing")
         await nodriver_tixcraft_ticket_main_ocr(tab, config_dict, ocr, Captcha_Browser, domain_name)
     else:
+        # GUARD (Bug 1.5-ⓐ): if form was just submitted, skip reload and
+        # let server complete its 3-10s redirect. Reloading would cancel
+        # the in-flight order and could be flagged as abnormal behaviour.
+        last_submit = _state.get("form_submitted_at", 0)
+        if last_submit > 0:
+            guard_raw = config_dict.get("advanced", {}).get("post_submit_reload_guard_seconds", 15.0)
+            try:
+                guard_seconds = float(guard_raw)
+                if guard_seconds < 0 or guard_seconds > 120:
+                    guard_seconds = 15.0
+            except (TypeError, ValueError):
+                guard_seconds = 15.0
+            elapsed = time.time() - last_submit
+            if elapsed < guard_seconds:
+                debug.log(f"[GUARD] Form submitted {elapsed:.1f}s ago (< {guard_seconds}s), skipping reload to let server redirect")
+                return
+
         # T026: Fix Issue #174 - reload page when ticket number cannot be set
         # This prevents infinite loop when desired ticket count is unavailable
         debug.log("[TICKET SELECT] Ticket count unavailable, reloading page to retry...")
@@ -2665,6 +2673,7 @@ async def nodriver_tixcraft_keyin_captcha_code(tab, answer="", auto_submit=False
                     # 清空並輸入答案
                     await form_verifyCode.apply('function (element) { element.value = ""; }')
                     await form_verifyCode.send_keys(answer)
+                    log_timing("T_form_filled", _timing_state, config_dict)
 
                     if auto_submit:
                         # 提交前確認票券數量是否已設定
@@ -2805,6 +2814,9 @@ async def nodriver_tixcraft_get_ocr_answer(tab, ocr, ocr_captcha_image_source, C
     """
     debug = util.create_debug_logger(enabled=False)  # OCR: intentionally silent
 
+    if config_dict is not None:
+        log_timing("T_ocr_start", _timing_state, config_dict)
+
     ocr_answer = None
     if not ocr is None:
         img_base64 = None
@@ -2849,6 +2861,8 @@ async def nodriver_tixcraft_get_ocr_answer(tab, ocr, ocr_captcha_image_source, C
                     if config_dict is not None:
                         log_timing("T_captcha_image_ready", _timing_state, config_dict)
                     img_base64 = base64.b64decode(form_verifyCode_base64.split(',')[1])
+                    if config_dict is not None:
+                        log_timing("T_image_captured", _timing_state, config_dict)
 
                 if img_base64 is None:
                     if not Captcha_Browser is None:
@@ -2862,6 +2876,8 @@ async def nodriver_tixcraft_get_ocr_answer(tab, ocr, ocr_captcha_image_source, C
         if not img_base64 is None:
             try:
                 ocr_answer = ocr.classification(img_base64)
+                if config_dict is not None:
+                    log_timing("T_ocr_done", _timing_state, config_dict)
             except Exception as exc:
                 debug.log("[TIXCRAFT OCR] Classification error:", str(exc))
 
@@ -3032,6 +3048,8 @@ async def nodriver_tixcraft_ticket_main_ocr(tab, config_dict, ocr, Captcha_Brows
         # Mark OCR completed for this URL only when form was actually submitted
         if is_form_submitted:
             _state["ocr_completed_url"] = current_url
+            _state["form_submitted_at"] = time.time()
+            debug.log(f"[GUARD] form_submitted_at recorded at {_state['form_submitted_at']:.3f}")
 
 # JS snippet that returns "blocked" only when the current page is the actual
 # PerimeterX EPS block page (action === "block"). Returning a string keeps the
@@ -3243,6 +3261,7 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
             "ticketmaster_phase": "area_select",
             "ticketmaster_captcha_processed_url": "",
             "ip_block_until": 0,
+            "form_submitted_at": 0,
         })
 
     # Register global alert handler (remains active throughout session)

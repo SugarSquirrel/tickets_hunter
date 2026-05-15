@@ -590,6 +590,7 @@ async def reload_config(config_dict, last_mtime):
                         "action_speed_multiplier",
                         "show_timing_log",
                         "ocr_retry_cooldown",
+                        "post_submit_reload_guard_seconds",
                     ]
                     for field in adv_fields:
                         if field in new_config["advanced"]:
