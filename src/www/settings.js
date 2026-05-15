@@ -68,6 +68,8 @@ const max_dwell_time = document.querySelector('#max_dwell_time');
 
 const auto_reload_page_interval = document.querySelector('#auto_reload_page_interval');
 const action_speed_multiplier = document.querySelector('#action_speed_multiplier');
+const ocr_retry_cooldown = document.querySelector('#ocr_retry_cooldown');
+const show_timing_log = document.querySelector('#show_timing_log');
 const reset_browser_interval = document.querySelector('#reset_browser_interval');
 const server_port = document.querySelector('#server_port');
 const proxy_server_port = document.querySelector('#proxy_server_port');
@@ -315,6 +317,14 @@ function load_settins_to_form(settings)
         if (action_speed_multiplier) {
             const mult = settings.advanced.action_speed_multiplier;
             action_speed_multiplier.value = (mult === undefined || mult === null) ? 1.0 : mult;
+        }
+        if (ocr_retry_cooldown) {
+            const cool = settings.advanced.ocr_retry_cooldown;
+            ocr_retry_cooldown.value = (cool === undefined || cool === null) ? 2.5 : cool;
+        }
+        if (show_timing_log) {
+            const flag = settings.advanced.show_timing_log;
+            show_timing_log.checked = (flag === undefined || flag === null) ? true : !!flag;
         }
         reset_browser_interval.value = settings.advanced.reset_browser_interval;
         server_port.value = settings.advanced.server_port || 16888;
@@ -585,6 +595,13 @@ function save_changes_to_dict(silent_flag)
             if (action_speed_multiplier) {
                 const raw = parseFloat(action_speed_multiplier.value);
                 settings.advanced.action_speed_multiplier = (Number.isFinite(raw) && raw >= 0) ? raw : 1.0;
+            }
+            if (ocr_retry_cooldown) {
+                const raw = parseFloat(ocr_retry_cooldown.value);
+                settings.advanced.ocr_retry_cooldown = (Number.isFinite(raw) && raw >= 0 && raw <= 60) ? raw : 2.5;
+            }
+            if (show_timing_log) {
+                settings.advanced.show_timing_log = !!show_timing_log.checked;
             }
             settings.advanced.reset_browser_interval = parseInt(reset_browser_interval.value);
             settings.advanced.server_port = parseInt(server_port.value) || 16888;

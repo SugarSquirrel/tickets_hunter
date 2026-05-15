@@ -27,6 +27,7 @@ from nodriver_common import (
     check_and_handle_pause,
     fetch_notification_extras,
     is_grabbing_critical,
+    log_timing,
     set_grabbing_critical,
     sleep_with_pause_check,
     convert_remote_object,
@@ -77,6 +78,27 @@ __all__ = [
 
 # Module-level state (replaces global tixcraft_dict)
 _state = {}
+
+# Navigation timing tracker for Task ① — per-navigation timestamps so we
+# can print [T] X_xxx: NNNms lines for key milestones. Reset on every
+# URL change or explicit tab.get()/tab.reload(). See reset_timing().
+_timing_state = {
+    "nav_start": None,   # time.perf_counter() captured at the navigation
+    "nav_url": "",       # URL the timer corresponds to
+    "fired": set(),      # tags already printed for this navigation
+}
+
+
+def reset_timing(url=""):
+    """Start a fresh navigation timer. Called by the main loop on URL
+    change and locally before tab.get() / tab.reload() in tixcraft code.
+    Never raises."""
+    try:
+        _timing_state["nav_start"] = time.perf_counter()
+        _timing_state["nav_url"] = url or ""
+        _timing_state["fired"] = set()
+    except Exception:
+        pass
 
 
 async def nodriver_tixcraft_home_close_window(tab):
@@ -460,18 +482,26 @@ async def nodriver_ticketmaster_get_ticketPriceList(tab, config_dict):
 
         debug.log("[TICKETMASTER TICKET] mapContainer found")
 
-        # Phase 2: Wait for loading to finish (check if loadingmap disappears)
-        max_wait = 10  # 10 seconds max
-        for i in range(max_wait):
+        # Phase 2: Wait for loading to finish (check if loadingmap disappears).
+        # Task ②: fine-grained 50ms poll, 10s overall cap. Logging keeps the
+        # 2-dp seconds format requested in the spec.
+        timeout_s = 10.0
+        poll_interval_s = 0.05
+        loading_start = time.perf_counter()
+        loading_finished = False
+        while True:
+            elapsed = time.perf_counter() - loading_start
+            if elapsed >= timeout_s:
+                break
             loading = await tab.query_selector('#loadingmap')
             if not loading:
-                if i > 0:
-                    debug.log(f"[TICKETMASTER TICKET] Loading finished after {i}s")
+                if elapsed > 0.05:
+                    debug.log(f"[TICKETMASTER TICKET] Loading finished after {elapsed:.2f}s")
+                loading_finished = True
                 break
-            await tab.sleep(1)
-        else:
-            # Timeout after 10 seconds
-            debug.log("[TICKETMASTER TICKET] Loading timeout after 10s")
+            await asyncio.sleep(poll_interval_s)
+        if not loading_finished:
+            debug.log(f"[TICKETMASTER TICKET] Loading timeout after {timeout_s:.2f}s")
 
         # Phase 3: Try to find ticketPriceList
         table_element = await tab.query_selector('#ticketPriceList')
@@ -510,22 +540,22 @@ async def nodriver_ticketmaster_date_auto_select(tab, config_dict):
     sold_out_text_list = ["Sold out", "No tickets available"]
     find_ticket_text_list = ['Find tickets', 'See Tickets']
 
-    # Query date list
-    # Ticketmaster.sg uses a table structure: #gameList tbody tr
-    # Wait for dynamic content to load (max 5 seconds)
+    # Query date list. Ticketmaster.sg uses a table structure: #gameList tbody tr.
+    # Task ②: wait_for() lets the bot wake the moment a row appears instead
+    # of the previous 0.5s polling loop. 5s overall cap preserved.
     area_list = None
-    max_attempts = 10
-    for attempt in range(max_attempts):
-        try:
-            area_list = await tab.query_selector_all('#gameList tbody tr')
-            if area_list and len(area_list) > 0:
-                debug.log(f"[TICKETMASTER DATE] Found date list after {attempt * 0.5}s")
-                break
-            await asyncio.sleep(0.5)
-        except Exception as exc:
-            if attempt == 0:
-                debug.log(f"[TICKETMASTER DATE] Waiting for date list to load... ({exc})")
-            await asyncio.sleep(0.5)
+    wait_start = time.perf_counter()
+    try:
+        await tab.wait_for('#gameList tbody tr', timeout=5)
+    except Exception as exc:
+        debug.log(f"[TICKETMASTER DATE] wait_for #gameList tbody tr timed out or errored: {exc}")
+    try:
+        area_list = await tab.query_selector_all('#gameList tbody tr')
+        if area_list and len(area_list) > 0:
+            debug.log(f"[TICKETMASTER DATE] Found date list after {time.perf_counter() - wait_start:.2f}s")
+    except Exception as exc:
+        debug.log(f"[TICKETMASTER DATE] query_selector_all failed: {exc}")
+        area_list = None
 
     if not area_list:
         debug.log(f"[TICKETMASTER DATE] Failed to find date list after {max_attempts * 0.5}s")
@@ -773,17 +803,20 @@ async def nodriver_ticketmaster_area_auto_select(tab, config_dict, zone_info):
             await tab.evaluate(click_area_javascript)
 
             # Wait for AJAX to load ticketPriceList (areaTicket executes AJAX request)
-            max_wait = 5  # 5 seconds max
-            for i in range(max_wait):
-                await tab.sleep(1)
-
-                # Check if ticketPriceList has loaded
-                price_list = await tab.query_selector('#ticketPriceList')
-                if price_list:
-                    debug.log(f"[TICKETMASTER AREA] ticketPriceList loaded after {i+1}s")
-                    break
+            # Task ②: wait_for() reacts the instant the AJAX response paints
+            # the price list, instead of the previous 1-second polling cadence.
+            # 5s overall cap preserved.
+            wait_start = time.perf_counter()
+            price_list_ready = False
+            try:
+                await tab.wait_for('#ticketPriceList', timeout=5)
+                price_list_ready = True
+            except Exception as exc:
+                debug.log(f"[TICKETMASTER AREA] wait_for #ticketPriceList timed out: {exc}")
+            if price_list_ready:
+                debug.log(f"[TICKETMASTER AREA] ticketPriceList loaded after {time.perf_counter() - wait_start:.2f}s")
             else:
-                debug.log("[TICKETMASTER AREA] Timeout waiting for ticketPriceList (5s)")
+                debug.log(f"[TICKETMASTER AREA] Timeout waiting for ticketPriceList ({time.perf_counter() - wait_start:.2f}s)")
 
             debug.log(f"[TICKETMASTER AREA] Selected zone: {target_area}")
 
@@ -1727,6 +1760,7 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
 
     if not el:
         return
+    log_timing("T_zone_visible", _timing_state, config_dict)
 
     is_need_refresh = False
     matched_blocks = None
@@ -1811,9 +1845,11 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
 
         try:
             await target_area.click()
+            log_timing("T_area_clicked", _timing_state, config_dict)
         except:
             try:
                 await target_area.evaluate('el => el.click()')
+                log_timing("T_area_clicked", _timing_state, config_dict)
             except:
                 pass
 
@@ -1921,6 +1957,8 @@ async def nodriver_get_tixcraft_target_area(tab, el, config_dict, area_keyword_i
         if batch_json:
             import json as _json
             batch_data = _json.loads(batch_json)
+            if isinstance(batch_data, list) and len(batch_data) > 0:
+                log_timing("T_zone_text_ready", _timing_state, config_dict)
     except Exception as exc:
         debug.log(f"[AREA KEYWORD] Batch evaluate failed, will fall back per-row: {exc}")
         batch_data = None
@@ -2255,6 +2293,7 @@ async def nodriver_tixcraft_assign_ticket_number(tab, config_dict):
     # 等待票券選擇器出現（智慧等待，取代固定 0.5 秒延遲）
     try:
         await tab.wait_for('.mobile-select, select[id*="TicketForm_ticketPrice_"]', timeout=2)
+        log_timing("T_ticket_select_visible", _timing_state, config_dict)
     except:
         pass  # Continue even if timeout, will try to find selectors below
 
@@ -2685,6 +2724,7 @@ async def nodriver_tixcraft_keyin_captcha_code(tab, answer="", auto_submit=False
                             # 提交表單 (按 Enter) - 使用完整的鍵盤事件
                             await tab.send(cdp.input_.dispatch_key_event("keyDown", code="Enter", key="Enter", text="\r", windows_virtual_key_code=13))
                             await tab.send(cdp.input_.dispatch_key_event("keyUp", code="Enter", key="Enter", text="\r", windows_virtual_key_code=13))
+                            log_timing("T_form_submitted", _timing_state, config_dict)
                             is_verifyCode_editing = False
                             is_form_submitted = True
                         else:
@@ -2757,8 +2797,12 @@ async def nodriver_tixcraft_reload_captcha(tab, domain_name, config_dict=None):
         debug.log(f"[TIXCRAFT OCR] reload_captcha failed: {exc}")
     return False
 
-async def nodriver_tixcraft_get_ocr_answer(tab, ocr, ocr_captcha_image_source, Captcha_Browser, domain_name):
-    """取得驗證碼圖片並進行 OCR 識別"""
+async def nodriver_tixcraft_get_ocr_answer(tab, ocr, ocr_captcha_image_source, Captcha_Browser, domain_name, config_dict=None):
+    """取得驗證碼圖片並進行 OCR 識別.
+
+    ``config_dict`` is optional and only used to drive the
+    ``T_captcha_image_ready`` timing log; the OCR itself ignores it.
+    """
     debug = util.create_debug_logger(enabled=False)  # OCR: intentionally silent
 
     ocr_answer = None
@@ -2802,6 +2846,8 @@ async def nodriver_tixcraft_get_ocr_answer(tab, ocr, ocr_captcha_image_source, C
                 ''', await_promise=True)
 
                 if form_verifyCode_base64:
+                    if config_dict is not None:
+                        log_timing("T_captcha_image_ready", _timing_state, config_dict)
                     img_base64 = base64.b64decode(form_verifyCode_base64.split(',')[1])
 
                 if img_base64 is None:
@@ -2847,7 +2893,7 @@ async def nodriver_tixcraft_auto_ocr(tab, config_dict, ocr, away_from_keyboard_e
         debug.log("[TIXCRAFT OCR] ocr_captcha_image_source:", ocr_captcha_image_source)
 
         ocr_start_time = time.time()
-        ocr_answer = await nodriver_tixcraft_get_ocr_answer(tab, ocr, ocr_captcha_image_source, Captcha_Browser, domain_name)
+        ocr_answer = await nodriver_tixcraft_get_ocr_answer(tab, ocr, ocr_captcha_image_source, Captcha_Browser, domain_name, config_dict=config_dict)
         ocr_done_time = time.time()
         ocr_elapsed_time = ocr_done_time - ocr_start_time
         debug.log("[TIXCRAFT OCR] Processing time:", "{:.3f}".format(ocr_elapsed_time))
@@ -2963,8 +3009,17 @@ async def nodriver_tixcraft_ticket_main_ocr(tab, config_dict, ocr, Captcha_Brows
                     except:
                         pass
 
-                    # Wait for potential auto-refresh
-                    await asyncio.sleep(2.5)
+                    # Wait for potential auto-refresh (Task ⑦: user-configurable).
+                    # Range 0.0-60.0; non-numeric falls back to spec default 2.5.
+                    cooldown = config_dict.get("advanced", {}).get("ocr_retry_cooldown", 2.5)
+                    try:
+                        cooldown = float(cooldown)
+                        if cooldown < 0 or cooldown > 60:
+                            cooldown = 2.5
+                    except (TypeError, ValueError):
+                        cooldown = 2.5
+                    if cooldown > 0:
+                        await asyncio.sleep(cooldown)
                     fail_count = 0  # Reset consecutive counter after handling
 
             # 檢查是否還在同一頁面

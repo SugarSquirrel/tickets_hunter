@@ -11,6 +11,7 @@ Dependency: util.py, settings.py, chrome_downloader.py (no platform imports)
 import asyncio
 import json
 import os
+import time
 import traceback
 
 from zendriver import cdp
@@ -707,6 +708,36 @@ async def nodriver_current_url(tab):
 
     return await _nodriver_current_url_deep(tab)
 
+def log_timing(tag, timing_state, config_dict):
+    """Print one-shot navigation timing tag, e.g. ``[T] T_zone_visible: 320ms``.
+
+    Each ``tag`` is fired at most once per navigation (tracked in
+    ``timing_state['fired']``). Resetting the navigation timer clears the
+    fired set so the same tag prints again for the new page load.
+
+    Silent when ``advanced.show_timing_log`` is False (default True), or
+    when there is no active navigation timer.
+    """
+    try:
+        if not config_dict.get("advanced", {}).get("show_timing_log", True):
+            return
+        if timing_state is None:
+            return
+        if timing_state.get("nav_start") is None:
+            return
+        fired = timing_state.get("fired")
+        if fired is None:
+            return
+        if tag in fired:
+            return
+        fired.add(tag)
+        elapsed_ms = (time.perf_counter() - timing_state["nav_start"]) * 1000
+        print(f"[T] {tag}: {elapsed_ms:.0f}ms")
+    except Exception:
+        # Timing log must never break the bot; swallow all failures.
+        pass
+
+
 async def batch_get_row_texts(tab, css_selector):
     """Fetch ``textContent`` for every element matching ``css_selector`` in ONE call.
 
@@ -1336,9 +1367,35 @@ async def nodriver_get_captcha_image_from_dom_snapshot(tab, config_dict):
     """
     debug = util.create_debug_logger(config_dict)
 
-    # Wait for page to stabilize before capturing
-    import random
-    await asyncio.sleep(random.uniform(0.5, 0.8))
+    # Task ③: Condition-poll for captcha image readiness instead of the
+    # previous fixed 0.5-0.8s wait. Wake the moment the captcha img has
+    # loaded (or a canvas exists, for kham/ibon new formats), capped at
+    # 2 seconds so a broken page can't hang us forever.
+    captcha_ready_timeout_s = 2.0
+    poll_interval_s = 0.05
+    elapsed = 0.0
+    while elapsed < captcha_ready_timeout_s:
+        try:
+            is_ready = await tab.evaluate('''
+                (function() {
+                    var imgs = document.querySelectorAll('img');
+                    for (var i = 0; i < imgs.length; i++) {
+                        var src = imgs[i].src || '';
+                        if ((src.indexOf('captcha') >= 0 || src.indexOf('pic.aspx') >= 0)
+                            && imgs[i].complete && imgs[i].naturalWidth > 0) {
+                            return true;
+                        }
+                    }
+                    var canvases = document.querySelectorAll('canvas');
+                    return canvases.length > 0;
+                })()
+            ''')
+            if is_ready:
+                break
+        except Exception:
+            pass
+        await asyncio.sleep(poll_interval_s)
+        elapsed += poll_interval_s
 
     img_base64 = None
 

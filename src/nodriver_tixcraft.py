@@ -588,6 +588,8 @@ async def reload_config(config_dict, last_mtime):
                         "discord_webhook_url", "telegram_bot_token", "telegram_chat_id",
                         "discount_code",
                         "action_speed_multiplier",
+                        "show_timing_log",
+                        "ocr_retry_cooldown",
                     ]
                     for field in adv_fields:
                         if field in new_config["advanced"]:
@@ -743,6 +745,14 @@ async def main(args):
                 write_last_url_to_file(url)
                 cloudflare_checked = False
                 cloudflare_fail_count = 0
+                # Task ① — reset per-navigation timer so [T] tags are
+                # measured from this URL change. Wrapped in try so a stale
+                # module reference can never break the main loop.
+                try:
+                    from platforms import tixcraft as _tx
+                    _tx.reset_timing(url)
+                except Exception:
+                    pass
             last_url = url
 
         if is_maxbot_paused:

@@ -215,6 +215,11 @@ def get_default_config():
     # Scales every "look human" sleep along the grab-to-submit path.
     # 1.0 = current behaviour, 0.5 = half delays, 0.0 = instant (risky).
     config_dict["advanced"]["action_speed_multiplier"] = 1.0
+    # Print [T] navigation timing tags (Task ①). Default ON.
+    config_dict["advanced"]["show_timing_log"] = True
+    # Wait seconds after 3 consecutive OCR failures before retrying (Task ⑦).
+    # Range 0.0-60.0; non-numeric falls back to default 2.5.
+    config_dict["advanced"]["ocr_retry_cooldown"] = 2.5
     config_dict["advanced"]["reset_browser_interval"] = 0
     config_dict["advanced"]["proxy_server_port"] = ""
     config_dict["advanced"]["window_size"] = "600,1024"
@@ -315,6 +320,13 @@ def migrate_config(config_dict):
             area["smart_sort_priority"] = "remaining rank"
             area.setdefault("smart_sort_rank_direction", "low")
             area.setdefault("smart_sort_rank_n", 1)
+
+    # Explicit setdefaults for fields introduced in this batch (Task ① / ⑦).
+    # Redundant with the generic fill loop below but kept per spec for
+    # clarity should the generic loop ever change.
+    if "advanced" in config_dict and isinstance(config_dict["advanced"], dict):
+        config_dict["advanced"].setdefault("show_timing_log", True)
+        config_dict["advanced"].setdefault("ocr_retry_cooldown", 2.5)
 
     # Ensure all default fields exist (fills missing keys from new versions)
     default = get_default_config()
