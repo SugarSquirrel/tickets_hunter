@@ -70,6 +70,7 @@ const auto_reload_page_interval = document.querySelector('#auto_reload_page_inte
 const action_speed_multiplier = document.querySelector('#action_speed_multiplier');
 const ocr_retry_cooldown = document.querySelector('#ocr_retry_cooldown');
 const post_submit_reload_guard_seconds = document.querySelector('#post_submit_reload_guard_seconds');
+const ticket_number_allow_max_fallback = document.querySelector('#ticket_number_allow_max_fallback');
 const show_timing_log = document.querySelector('#show_timing_log');
 const reset_browser_interval = document.querySelector('#reset_browser_interval');
 const server_port = document.querySelector('#server_port');
@@ -325,7 +326,11 @@ function load_settins_to_form(settings)
         }
         if (post_submit_reload_guard_seconds) {
             const v = settings.advanced.post_submit_reload_guard_seconds;
-            post_submit_reload_guard_seconds.value = (v === undefined || v === null) ? 15 : v;
+            post_submit_reload_guard_seconds.value = (v === undefined || v === null) ? 180 : v;
+        }
+        if (ticket_number_allow_max_fallback) {
+            const flag = settings.advanced.ticket_number_allow_max_fallback;
+            ticket_number_allow_max_fallback.checked = (flag === undefined || flag === null) ? true : !!flag;
         }
         if (show_timing_log) {
             const flag = settings.advanced.show_timing_log;
@@ -607,7 +612,10 @@ function save_changes_to_dict(silent_flag)
             }
             if (post_submit_reload_guard_seconds) {
                 const raw = parseFloat(post_submit_reload_guard_seconds.value);
-                settings.advanced.post_submit_reload_guard_seconds = (Number.isFinite(raw) && raw >= 0 && raw <= 120) ? raw : 15.0;
+                settings.advanced.post_submit_reload_guard_seconds = (Number.isFinite(raw) && raw >= 0 && raw <= 600) ? raw : 180.0;
+            }
+            if (ticket_number_allow_max_fallback) {
+                settings.advanced.ticket_number_allow_max_fallback = !!ticket_number_allow_max_fallback.checked;
             }
             if (show_timing_log) {
                 settings.advanced.show_timing_log = !!show_timing_log.checked;
@@ -1438,6 +1446,51 @@ document.addEventListener('keydown', function(e) {
 window.addEventListener('beforeunload', () => {
     stopQuestionPolling();
 });
+
+
+// ============================================================
+// Bug 1.6-ⓘ Layer C: Manual reload-disable toggle (peak-load rescue)
+// ============================================================
+const noReloadToggleBtn = document.querySelector('#noReloadToggleBtn');
+const noReloadStatusText = document.querySelector('#noReloadStatusText');
+
+async function refreshNoReloadStatus() {
+    if (!noReloadToggleBtn || !noReloadStatusText) return;
+    try {
+        const resp = await fetch('/api/no-reload');
+        const data = await resp.json();
+        if (data.active) {
+            noReloadToggleBtn.textContent = '🔓 恢復 auto reload';
+            noReloadToggleBtn.className = 'btn btn-danger';
+            noReloadStatusText.textContent = '目前狀態：🔒 已暫停（bot 不會自動 reload）';
+            noReloadStatusText.style.color = '#dc3545';
+            noReloadStatusText.style.fontWeight = 'bold';
+        } else {
+            noReloadToggleBtn.textContent = '🔒 暫停 auto reload';
+            noReloadToggleBtn.className = 'btn btn-warning';
+            noReloadStatusText.textContent = '目前狀態：🔓 正常運作';
+            noReloadStatusText.style.color = '';
+            noReloadStatusText.style.fontWeight = 'normal';
+        }
+    } catch (e) {
+        noReloadStatusText.textContent = '目前狀態：查詢失敗';
+    }
+}
+
+if (noReloadToggleBtn) {
+    noReloadToggleBtn.addEventListener('click', async () => {
+        try {
+            const formData = new FormData();
+            formData.append('action', 'toggle');
+            await fetch('/api/no-reload', { method: 'POST', body: formData });
+            await refreshNoReloadStatus();
+        } catch (e) {
+            console.error('Failed to toggle no-reload marker:', e);
+        }
+    });
+    refreshNoReloadStatus();
+    setInterval(refreshNoReloadStatus, 5000);
+}
 
 
 // ============================================================

@@ -348,7 +348,10 @@
           <label for="refresh_datetime" class="col-sm-2 col-form-label">刷新在指定時間<span class="help-icon" data-help="refresh_datetime" title="刷新在指定時間說明" tabindex="0" role="button" aria-label="刷新在指定時間 說明"></span>
           </label>
           <div class="col-sm-10 col-lg-8 col-xl-6">
-            <input class="form-control highlight-field" id="refresh_datetime" value="" placeholder="YYYY/MM/DD HH:MM:SS" />
+            <input class="form-control highlight-field" id="refresh_datetime" value="" placeholder="2026/05/16 12:00:00.000 或 12:00:00.5" />
+            <small class="form-text text-muted d-block mt-1">
+              支援小數秒，例如 <code>11:59:59.9</code> 或 <code>2026/05/16 12:00:00.500</code>，精度可達毫秒。
+            </small>
           </div>
         </div>
 
@@ -756,12 +759,37 @@
           </div>
         </div>
 
+        <div class="row mb-3" style="background: #fff3cd; padding: 10px; border-radius: 4px; margin-top: 8px;">
+          <label class="col-sm-2 col-form-label" style="font-weight: bold;">搶票尖峰救援</label>
+          <div class="col-sm-10 col-lg-8 col-xl-6">
+            <button type="button" id="noReloadToggleBtn" class="btn btn-warning">🔒 暫停 auto reload</button>
+            <span id="noReloadStatusText" style="margin-left: 12px;">目前狀態：未知</span>
+            <small class="form-text d-block mt-2" style="color: #856404;">
+              <strong>使用情境：</strong>搶票尖峰 server 可能 2 分鐘以上才回應。按下「暫停」後 bot 永不 reload（仍照常處理頁面），直到 URL 進到區域/訂單/結帳頁自動恢復，或手動按「恢復」。
+            </small>
+          </div>
+        </div>
+
         <div class="row mb-3">
           <label for="post_submit_reload_guard_seconds" class="col-sm-2 col-form-label">送出後 reload 護欄(秒)</label>
           <div class="col-sm-10 col-lg-8 col-xl-6">
-            <input class="form-control" id="post_submit_reload_guard_seconds" type="number" step="1" min="0" max="120" value="15" />
+            <input class="form-control" id="post_submit_reload_guard_seconds" type="number" step="1" min="0" max="600" value="180" />
             <small class="form-text text-muted d-block mt-1">
-              驗證碼表單成功送出後，禁止 reload 的秒數，讓 server 自然 redirect 到付款頁。預設 <strong>15</strong>；<strong>0</strong> = 關閉護欄（不建議，可能取消 in-flight 訂單）；範圍 0~120。
+              驗證碼表單成功送出後，禁止 reload 的秒數，讓 server 自然 redirect 到付款頁。預設 <strong>180</strong>（含搶票尖峰 buffer）；<strong>0</strong> = 關閉護欄（不建議，可能取消 in-flight 訂單）；範圍 0~600。<br>
+              <strong>從舊版升級的使用者注意：</strong>若你之前手動存過 15，建議手動改成 180。
+            </small>
+          </div>
+        </div>
+
+        <div class="row mb-3">
+          <label class="col-sm-2 col-form-label">張數 fallback</label>
+          <div class="col-sm-10 col-lg-8 col-xl-6">
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" id="ticket_number_allow_max_fallback" checked>
+              <label class="form-check-label" for="ticket_number_allow_max_fallback">允許退回最大可用張數</label>
+            </div>
+            <small class="form-text text-muted d-block mt-1">
+              當設定購買 N 張但選單沒有 N 時：勾選 = 自動挑「最大可用值」（例如想買 4 但只剩 2 → 買 2）；取消 = 嚴格模式，找不到精準張數就 reload 重試。預設 <strong>勾選</strong>。
             </small>
           </div>
         </div>

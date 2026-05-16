@@ -221,8 +221,11 @@ def get_default_config():
     # Range 0.0-60.0; non-numeric falls back to default 2.5.
     config_dict["advanced"]["ocr_retry_cooldown"] = 2.5
     # After form submission, suppress reload for this many seconds so the
-    # server's natural redirect isn't pre-empted (Bug 1.5-ⓐ).
-    config_dict["advanced"]["post_submit_reload_guard_seconds"] = 15.0
+    # server's natural redirect isn't pre-empted (Bug 1.5-ⓐ, Bug 1.6-ⓘ Layer A).
+    config_dict["advanced"]["post_submit_reload_guard_seconds"] = 180.0
+    # When True (default), fall back to max available ticket count when the
+    # exact requested count isn't selectable. False = strict mode (reload-retry).
+    config_dict["advanced"]["ticket_number_allow_max_fallback"] = True
     config_dict["advanced"]["reset_browser_interval"] = 0
     config_dict["advanced"]["proxy_server_port"] = ""
     config_dict["advanced"]["window_size"] = "600,1024"
@@ -330,7 +333,11 @@ def migrate_config(config_dict):
     if "advanced" in config_dict and isinstance(config_dict["advanced"], dict):
         config_dict["advanced"].setdefault("show_timing_log", True)
         config_dict["advanced"].setdefault("ocr_retry_cooldown", 2.5)
-        config_dict["advanced"].setdefault("post_submit_reload_guard_seconds", 15.0)
+        # Bug 1.6-ⓘ: extended default from 15s to 180s for peak-load tolerance.
+        # NOTE: setdefault won't overwrite existing 15.0 values from Batch 1.5 users —
+        # they should manually bump it via the settings UI.
+        config_dict["advanced"].setdefault("post_submit_reload_guard_seconds", 180.0)
+        config_dict["advanced"].setdefault("ticket_number_allow_max_fallback", True)
 
     # Ensure all default fields exist (fills missing keys from new versions)
     default = get_default_config()
@@ -594,6 +601,39 @@ class RunHandler(tornado.web.RequestHandler):
         print('run button pressed.')
         launch_maxbot()
         self.write({"run": True})
+
+class NoReloadToggleHandler(tornado.web.RequestHandler):
+    """Bug 1.6-ⓘ Layer C UI: toggle the MAXBOT_NO_RELOAD.txt marker file.
+
+    Marker lives in SCRIPT_DIR (next to settings.py / nodriver_common.py) so
+    all bots launched from this checkout share one switch.
+    """
+
+    @staticmethod
+    def _marker_path():
+        return os.path.join(SCRIPT_DIR, "MAXBOT_NO_RELOAD.txt")
+
+    def get(self):
+        self.write({"active": os.path.exists(self._marker_path())})
+
+    def post(self):
+        action = self.get_argument("action", "toggle")
+        marker_path = self._marker_path()
+        exists = os.path.exists(marker_path)
+
+        if action == "enable" and not exists:
+            with open(marker_path, "w", encoding="utf-8") as f:
+                f.write(f"created_at={datetime.now().isoformat()}\n")
+        elif action == "disable" and exists:
+            os.remove(marker_path)
+        elif action == "toggle":
+            if exists:
+                os.remove(marker_path)
+            else:
+                with open(marker_path, "w", encoding="utf-8") as f:
+                    f.write(f"created_at={datetime.now().isoformat()}\n")
+
+        self.write({"active": os.path.exists(marker_path)})
 
 class LoadJsonHandler(tornado.web.RequestHandler):
     def get(self):
@@ -1139,6 +1179,7 @@ async def main_server():
         ("/pause", PauseHandler),
         ("/resume", ResumeHandler),
         ("/run", RunHandler),
+        ("/api/no-reload", NoReloadToggleHandler),
         
         # json api
         ("/load", LoadJsonHandler),

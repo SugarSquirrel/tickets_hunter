@@ -36,6 +36,51 @@ CONST_MAXBOT_CONFIG_FILE = "settings.json"
 CONST_MAXBOT_INT28_FILE = "MAXBOT_INT28_IDLE.txt"
 CONST_MAXBOT_LAST_URL_FILE = "MAXBOT_LAST_URL.txt"
 CONST_MAXBOT_QUESTION_FILE = "MAXBOT_QUESTION.txt"
+# Bug 1.6-ⓘ Layer C: manual reload-disable marker (user-controlled, global).
+CONST_MAXBOT_NO_RELOAD_FILE = "MAXBOT_NO_RELOAD.txt"
+
+
+# ===== Cross-module reload timestamp (Bug 1.6-ⓗ F5 detection) =====
+# Track when bot itself initiated a reload, so the frameNavigated handler can
+# distinguish bot reloads from user-triggered F5 / Ctrl+F5.
+_bot_reload_tracker = {"last_bot_reload_at": 0.0}
+
+
+def mark_bot_reload():
+    """Record the timestamp of a bot-initiated tab.reload(). Call right before reload."""
+    _bot_reload_tracker["last_bot_reload_at"] = time.time()
+
+
+def get_last_bot_reload_at():
+    """Return the most recent bot reload timestamp (0.0 if never)."""
+    return _bot_reload_tracker.get("last_bot_reload_at", 0.0)
+
+
+# ===== Marker file helpers (Bug 1.6-ⓘ Layer C) =====
+
+def _no_reload_marker_path():
+    """Path to MAXBOT_NO_RELOAD.txt next to nodriver_common.py."""
+    return os.path.join(os.path.dirname(os.path.realpath(__file__)), CONST_MAXBOT_NO_RELOAD_FILE)
+
+
+def is_reload_disabled():
+    """Check if the manual reload-disable marker is present. Never raises."""
+    try:
+        return os.path.exists(_no_reload_marker_path())
+    except Exception:
+        return False
+
+
+def remove_no_reload_marker():
+    """Delete the marker file if present. Returns True iff a file was removed. Never raises."""
+    try:
+        path = _no_reload_marker_path()
+        if os.path.exists(path):
+            os.remove(path)
+            return True
+    except Exception:
+        pass
+    return False
 
 CONST_FROM_TOP_TO_BOTTOM = "from top to bottom"
 CONST_FROM_BOTTOM_TO_TOP = "from bottom to top"
@@ -1073,6 +1118,7 @@ async def handle_cloudflare_challenge(tab, config_dict, max_retry=None):
             if retry_count == max_retry - 1:
                 try:
                     debug.log("[CLOUDFLARE] Last attempt: Refreshing page")
+                    mark_bot_reload()
                     await tab.reload()
                     await tab.sleep(5)
                     if not await detect_cloudflare_challenge(tab, cf_debug):

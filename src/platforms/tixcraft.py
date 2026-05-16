@@ -43,6 +43,10 @@ from nodriver_common import (
     CONST_MAXBOT_INT28_FILE,
     CONST_OCR_CAPTCH_IMAGE_SOURCE_CANVAS,
     CONST_OCR_CAPTCH_IMAGE_SOURCE_NON_BROWSER,
+    mark_bot_reload,
+    get_last_bot_reload_at,
+    is_reload_disabled,
+    remove_no_reload_marker,
 )
 
 __all__ = [
@@ -733,6 +737,7 @@ async def nodriver_ticketmaster_date_auto_select(tab, config_dict):
     if auto_reload_coming_soon_page_enable and not is_date_clicked and len(formated_area_list) == 0:
         debug.log("[TICKETMASTER DATE] No dates available, reloading page...")
         try:
+            mark_bot_reload()
             await tab.reload()
             await util.humanize_sleep(0.3, 0.3, config_dict)
         except:
@@ -834,6 +839,7 @@ async def nodriver_ticketmaster_area_auto_select(tab, config_dict, zone_info):
             try:
                 if config_dict.get("advanced", {}).get("auto_reload_page_interval", 0) > 0:
                     await tab.sleep(config_dict["advanced"]["auto_reload_page_interval"])
+                mark_bot_reload()
                 await tab.reload()
             except:
                 pass
@@ -1724,6 +1730,7 @@ async def nodriver_tixcraft_date_auto_select(tab, url, config_dict, domain_name)
 
         debug.log(f"[DATE SELECT] No date selected, reloading page...")
         try:
+            mark_bot_reload()
             await tab.reload()
         except Exception:
             pass
@@ -1862,6 +1869,7 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
 
         debug.log(f"[AREA SELECT] Page reloading...")
         try:
+            mark_bot_reload()
             await tab.reload()
         except Exception:
             pass
@@ -2202,7 +2210,7 @@ async def nodriver_get_tixcraft_target_area(tab, el, config_dict, area_keyword_i
 
     return is_need_refresh, matched_blocks
 
-async def nodriver_ticket_number_select_fill(tab, select_obj, ticket_number, select_id=None):
+async def nodriver_ticket_number_select_fill(tab, select_obj, ticket_number, select_id=None, config_dict=None):
     """簡化版本：參考 Chrome 邏輯設定票券數量，並檢查 option 是否可用
 
     Args:
@@ -2210,11 +2218,19 @@ async def nodriver_ticket_number_select_fill(tab, select_obj, ticket_number, sel
         select_obj: The select element (for compatibility)
         ticket_number: Target ticket count to select
         select_id: The specific select element ID to use (fixes Issue #200/#201)
+        config_dict: Optional config — gates ticket_number_allow_max_fallback (Bug 1.6-ⓔ)
     """
     is_ticket_number_assigned = False
+    debug = util.create_debug_logger(config_dict) if config_dict else util.create_debug_logger(enabled=False)
 
     if select_obj is None and select_id is None:
         return is_ticket_number_assigned
+
+    # Bug 1.6-ⓔ: max-fallback toggle (default True keeps existing behaviour)
+    allow_fallback = True
+    if config_dict is not None:
+        allow_fallback = bool(config_dict.get("advanced", {}).get("ticket_number_allow_max_fallback", True))
+    allow_fallback_js = "true" if allow_fallback else "false"
 
     # Build JavaScript selector - prefer specific ID over querySelector
     if select_id:
@@ -2231,6 +2247,7 @@ async def nodriver_ticket_number_select_fill(tab, select_obj, ticket_number, sel
 
                 // 售完關鍵字列表
                 const soldOutKeywords = ["選購一空", "已售完", "Sold out", "No tickets available", "空席なし", "完売した"];
+                const allowMaxFallback = {allow_fallback_js};
 
                 // 先嘗試設定目標數量（檢查是否 disabled 或售完）
                 const targetOption = Array.from(select.options).find(opt =>
@@ -2243,28 +2260,32 @@ async def nodriver_ticket_number_select_fill(tab, select_obj, ticket_number, sel
                     select.value = "{ticket_number}";
                     select.selectedIndex = targetOption.index;
                     select.dispatchEvent(new Event('change', {{bubbles: true}}));
-                    return {{success: true, selected: "{ticket_number}"}};
+                    return {{success: true, selected: "{ticket_number}", exact: true}};
                 }}
 
-                // Fallback: select max available option instead of hardcoded "1"
-                const validOptions = Array.from(select.options).filter(opt =>
-                    !opt.disabled &&
-                    !soldOutKeywords.includes(opt.value) &&
-                    parseInt(opt.value) > 0 &&
-                    !isNaN(parseInt(opt.value))
-                );
-
-                if (validOptions.length > 0) {{
-                    const maxOption = validOptions.reduce((max, opt) =>
-                        parseInt(opt.value) > parseInt(max.value) ? opt : max
+                if (allowMaxFallback) {{
+                    // Fallback: select max available option instead of hardcoded "1"
+                    const validOptions = Array.from(select.options).filter(opt =>
+                        !opt.disabled &&
+                        !soldOutKeywords.includes(opt.value) &&
+                        parseInt(opt.value) > 0 &&
+                        !isNaN(parseInt(opt.value))
                     );
-                    select.value = maxOption.value;
-                    select.selectedIndex = maxOption.index;
-                    select.dispatchEvent(new Event('change', {{bubbles: true}}));
-                    return {{success: true, selected: maxOption.value, fallback: true}};
+
+                    if (validOptions.length > 0) {{
+                        const maxOption = validOptions.reduce((max, opt) =>
+                            parseInt(opt.value) > parseInt(max.value) ? opt : max
+                        );
+                        select.value = maxOption.value;
+                        select.selectedIndex = maxOption.index;
+                        select.dispatchEvent(new Event('change', {{bubbles: true}}));
+                        return {{success: true, selected: maxOption.value, fallback: true}};
+                    }}
+
+                    return {{success: false, error: "No valid options (all disabled or sold out)"}};
                 }}
 
-                return {{success: false, error: "No valid options (all disabled or sold out)"}};
+                return {{success: false, error: "Exact ticket number not available and fallback disabled"}};
             }})();
         ''')
 
@@ -2272,6 +2293,8 @@ async def nodriver_ticket_number_select_fill(tab, select_obj, ticket_number, sel
         result = util.parse_nodriver_result(result)
         if isinstance(result, dict):
             is_ticket_number_assigned = result.get('success', False)
+            if result.get('fallback'):
+                debug.log(f"[TICKET FALLBACK] Requested {ticket_number}, fell back to max available: {result.get('selected')}")
 
     except Exception as exc:
         logger.warning(f"Failed to set ticket number: {exc}")
@@ -2579,7 +2602,7 @@ async def nodriver_tixcraft_ticket_main(tab, config_dict, ocr, Captcha_Browser, 
 
     if not is_ticket_number_assigned:
         debug.log(f"Setting ticket number: {ticket_number}")
-        is_ticket_number_assigned = await nodriver_ticket_number_select_fill(tab, select_obj, ticket_number, select_id)
+        is_ticket_number_assigned = await nodriver_ticket_number_select_fill(tab, select_obj, ticket_number, select_id, config_dict)
 
     # Record state after successful setting
     if is_ticket_number_assigned:
@@ -2587,22 +2610,29 @@ async def nodriver_tixcraft_ticket_main(tab, config_dict, ocr, Captcha_Browser, 
         debug.log("Ticket number set successfully, starting OCR captcha processing")
         await nodriver_tixcraft_ticket_main_ocr(tab, config_dict, ocr, Captcha_Browser, domain_name)
     else:
-        # GUARD (Bug 1.5-ⓐ): if form was just submitted, skip reload and
-        # let server complete its 3-10s redirect. Reloading would cancel
-        # the in-flight order and could be flagged as abnormal behaviour.
+        # === Multi-layer Reload Guard (Bug 1.6-ⓘ) ===
+
+        # Layer C: marker file (manual override) — highest priority
+        if is_reload_disabled():
+            debug.log("[GUARD] (marker active) MAXBOT_NO_RELOAD.txt detected, reload disabled")
+            return
+
+        # Layer A: form_submitted_at timeout (extended default 180s)
         last_submit = _state.get("form_submitted_at", 0)
         if last_submit > 0:
-            guard_raw = config_dict.get("advanced", {}).get("post_submit_reload_guard_seconds", 15.0)
+            guard_raw = config_dict.get("advanced", {}).get("post_submit_reload_guard_seconds", 180.0)
             try:
                 guard_seconds = float(guard_raw)
-                if guard_seconds < 0 or guard_seconds > 120:
-                    guard_seconds = 15.0
+                if guard_seconds < 0 or guard_seconds > 600:
+                    guard_seconds = 180.0
             except (TypeError, ValueError):
-                guard_seconds = 15.0
+                guard_seconds = 180.0
             elapsed = time.time() - last_submit
             if elapsed < guard_seconds:
-                debug.log(f"[GUARD] Form submitted {elapsed:.1f}s ago (< {guard_seconds}s), skipping reload to let server redirect")
+                debug.log(f"[GUARD] (timeout={guard_seconds}s mode) Form submitted {elapsed:.1f}s ago, skipping reload to let server redirect")
                 return
+            else:
+                debug.log(f"[GUARD] (timeout={guard_seconds}s mode) Form submitted {elapsed:.1f}s ago (> {guard_seconds}s), reloading as fail-safe")
 
         # T026: Fix Issue #174 - reload page when ticket number cannot be set
         # This prevents infinite loop when desired ticket count is unavailable
@@ -2612,6 +2642,7 @@ async def nodriver_tixcraft_ticket_main(tab, config_dict, ocr, Captcha_Browser, 
             interval = config_dict["advanced"].get("auto_reload_page_interval", 0)
             if interval > 0:
                 await asyncio.sleep(interval)
+            mark_bot_reload()
             await tab.reload()
         except Exception as reload_exc:
             debug.log(f"[TICKET SELECT] Reload failed: {reload_exc}")
@@ -3235,6 +3266,13 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
 
         # Issue #188: Set cooldown timestamp instead of async sleep (event handler doesn't block main loop)
         if is_sold_out_alert and dismiss_success:
+            # Bug 1.6-ⓙ: a real sold-out is NOT a server-processing delay.
+            # Clear form_submitted_at so the reload guard doesn't hold us back
+            # from retrying.
+            if _state.get("form_submitted_at", 0) > 0:
+                debug.log("[GLOBAL ALERT] Sold out detected, clearing form_submitted_at to unblock reload guard")
+                _state["form_submitted_at"] = 0
+
             interval = config_dict["advanced"].get("auto_reload_page_interval", 0)
             if interval > 0:
                 cooldown_until = time.time() + interval
@@ -3262,6 +3300,8 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
             "ticketmaster_captcha_processed_url": "",
             "ip_block_until": 0,
             "form_submitted_at": 0,
+            # Bug 1.6-ⓗ F5 detection
+            "frame_nav_handler_registered": False,
         })
 
     # Register global alert handler (remains active throughout session)
@@ -3274,7 +3314,72 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
         except Exception as handler_exc:
             debug.log(f"[GLOBAL ALERT] Failed to register alert handler: {handler_exc}")
 
+    # Bug 1.6-ⓗ: Manual F5 / Ctrl+F5 detection via Page.frameNavigated.
+    # If the navigation didn't follow a recent mark_bot_reload(), it's a
+    # user-initiated reload — clear URL-keyed cached state so the bot
+    # re-runs ticket selection, captcha preheat and OCR on this URL.
+    async def handle_frame_navigated(event):
+        try:
+            frame = getattr(event, 'frame', None)
+            if frame is None:
+                return
+            # Only main frame (sub-frames have a non-empty parent_id)
+            parent_id = getattr(frame, 'parent_id', None)
+            if parent_id:
+                return
+
+            # Distinguish bot reload vs manual F5
+            if time.time() - get_last_bot_reload_at() < 0.5:
+                return
+
+            current_url = getattr(frame, 'url', '') or ''
+            debug.log(f"[F5] Manual page reload detected at {current_url}")
+
+            ticket_key_prefix = f"ticket_assigned_{current_url}_"
+            preheat_key = f"captcha_preheat_{current_url}"
+            keys_to_clear = [
+                k for k in list(_state.keys())
+                if k.startswith(ticket_key_prefix) or k == preheat_key
+            ]
+            for k in keys_to_clear:
+                _state.pop(k, None)
+
+            if _state.get("ocr_completed_url") == current_url:
+                _state["ocr_completed_url"] = ""
+
+            # IMPORTANT: do NOT touch form_submitted_at — that's the reload
+            # guard's responsibility. Do NOT clear grabbing_critical either.
+            debug.log(f"[F5] Cleared state keys: {keys_to_clear}")
+        except Exception as exc:
+            debug.log(f"[F5] Handler error: {exc}")
+
+    if not _state.get("frame_nav_handler_registered", False):
+        try:
+            tab.add_handler(cdp.page.FrameNavigated, handle_frame_navigated)
+            _state["frame_nav_handler_registered"] = True
+            debug.log("[F5] Frame navigation handler registered")
+        except Exception as handler_exc:
+            debug.log(f"[F5] Failed to register frame nav handler: {handler_exc}")
+
     await nodriver_tixcraft_home_close_window(tab)
+
+    # Bug 1.6-ⓘ Layer B: URL transition auto-clears form_submitted_at.
+    # Leaving the /ticket/ticket page means the submit either succeeded
+    # (server redirected to /ticket/area, /ticket/order, /ticket/checkout)
+    # or failed terminally — either way the guard no longer applies.
+    if '/ticket/ticket/' not in url:
+        if _state.get("form_submitted_at", 0) > 0:
+            elapsed = time.time() - _state["form_submitted_at"]
+            debug.log(f"[GUARD] (URL-cleared) Left /ticket/ticket after {elapsed:.1f}s, clearing form_submitted_at")
+            _state["form_submitted_at"] = 0
+
+    # Bug 1.6-ⓘ Layer D: auto-remove marker when we reach a safe URL.
+    # Defines "safe" as having advanced past the captcha submit point.
+    safe_url_keywords = ['/ticket/area/', '/ticket/order', '/ticket/checkout']
+    if any(kw in url for kw in safe_url_keywords):
+        if is_reload_disabled():
+            if remove_no_reload_marker():
+                debug.log(f"[GUARD] (marker auto-removed) Reached safe URL ({url}), removed MAXBOT_NO_RELOAD.txt")
 
     # EPS block detection for tixcraft and ticketmaster domains (Issue #289)
     if 'tixcraft.com' in url or 'ticketmaster' in url:

@@ -461,21 +461,39 @@ async def _inject_clarity_stub_for_ticketplus(tab):
 
 def parse_refresh_datetime(target_str):
     # Parse refresh_datetime setting to a datetime object.
-    # Supports: "YYYY/MM/DD HH:MM:SS" | "HH:MM:SS" (today) | "" (disabled)
-    # Returns: datetime or None
+    # Supports: "YYYY/MM/DD HH:MM:SS[.fff]" | "HH:MM:SS[.fff]" (today) | "" (disabled)
+    # Sub-second precision (Bug 1.6-ⓕ): try .%f format first, fall back to whole-second.
     if not target_str or not target_str.strip():
         return None
     target_str = target_str.strip()
-    try:
-        if '/' in target_str:
-            return datetime.strptime(target_str, '%Y/%m/%d %H:%M:%S')
-        else:
-            # Stage 0: legacy HH:MM:SS format, treat as today
-            today = datetime.now().date()
-            t = datetime.strptime(target_str, '%H:%M:%S').time()
-            return datetime.combine(today, t)
-    except ValueError:
+
+    if '/' in target_str:
+        for fmt in ('%Y/%m/%d %H:%M:%S.%f', '%Y/%m/%d %H:%M:%S'):
+            try:
+                return datetime.strptime(target_str, fmt)
+            except ValueError:
+                continue
         return None
+    else:
+        today = datetime.now().date()
+        for fmt in ('%H:%M:%S.%f', '%H:%M:%S'):
+            try:
+                t = datetime.strptime(target_str, fmt).time()
+                return datetime.combine(today, t)
+            except ValueError:
+                continue
+        return None
+
+
+def _format_reload_fired_log(target_dt):
+    # Bug 1.6-ⓖ: wall-clock log for refresh_datetime trigger calibration.
+    # Not nav-relative so it bypasses log_timing / _timing_state.
+    actual_dt = datetime.now()
+    delta_ms = int((actual_dt - target_dt).total_seconds() * 1000)
+    sign = '+' if delta_ms >= 0 else ''
+    target_str = target_dt.strftime('%H:%M:%S.%f')[:-3]
+    actual_str = actual_dt.strftime('%H:%M:%S.%f')[:-3]
+    return f"[T] T_reload_fired: target={target_str} actual={actual_str} delta={sign}{delta_ms}ms"
 
 
 async def check_refresh_datetime_gate(tab, config_dict, state):
@@ -506,6 +524,9 @@ async def check_refresh_datetime_gate(tab, config_dict, state):
     if now >= target_dt:
         state["reached"] = True
         try:
+            if config_dict.get("advanced", {}).get("show_timing_log", True):
+                print(_format_reload_fired_log(target_dt))
+            mark_bot_reload()
             await tab.reload()
             print("[REFRESH] Target time reached, starting:", target_dt.strftime('%Y/%m/%d %H:%M:%S'))
         except Exception:
@@ -545,6 +566,9 @@ async def check_refresh_datetime_gate(tab, config_dict, state):
             pass
         state["reached"] = True
         try:
+            if config_dict.get("advanced", {}).get("show_timing_log", True):
+                print(_format_reload_fired_log(target_dt))
+            mark_bot_reload()
             await tab.reload()
             print("[REFRESH] Target time reached (precision), starting:", target_dt.strftime('%Y/%m/%d %H:%M:%S'))
         except Exception:
@@ -591,6 +615,7 @@ async def reload_config(config_dict, last_mtime):
                         "show_timing_log",
                         "ocr_retry_cooldown",
                         "post_submit_reload_guard_seconds",
+                        "ticket_number_allow_max_fallback",
                     ]
                     for field in adv_fields:
                         if field in new_config["advanced"]:
