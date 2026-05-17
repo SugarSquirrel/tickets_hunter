@@ -1473,7 +1473,9 @@ async function refreshNoReloadStatus() {
             noReloadStatusText.style.fontWeight = 'normal';
         }
     } catch (e) {
-        noReloadStatusText.textContent = '目前狀態：查詢失敗';
+        noReloadStatusText.textContent = '目前狀態：查詢失敗（請檢查 bot 是否在執行中）';
+        noReloadStatusText.style.color = '#dc3545';
+        noReloadStatusText.style.fontWeight = 'normal';
     }
 }
 
