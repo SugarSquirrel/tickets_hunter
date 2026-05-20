@@ -47,6 +47,9 @@ from nodriver_common import (
     get_last_bot_reload_at,
     is_reload_disabled,
     remove_no_reload_marker,
+    record_area_outcome,
+    get_effective_mode,
+    get_effective_reload_interval,
 )
 
 __all__ = [
@@ -1722,13 +1725,14 @@ async def nodriver_tixcraft_date_auto_select(tab, url, config_dict, domain_name)
 
     # Auto refresh if no date was selected (for strict mode or sold out scenarios)
     if not is_date_clicked:
-        # Simple wait mode (consistent with TicketPlus/iBon/FamiTicket)
-        interval = config_dict["advanced"].get("auto_reload_page_interval", 0)
+        # Batch 2 (S-3): pick interval based on smart-mode state.
+        mode = get_effective_mode(config_dict)
+        interval = get_effective_reload_interval(config_dict)
         if interval > 0:
-            debug.log(f"[DATE SELECT] Waiting {interval}s before reload...")
+            debug.log(f"[DATE SELECT] Waiting {interval}s before reload (mode={mode})...")
             await asyncio.sleep(interval)
 
-        debug.log(f"[DATE SELECT] No date selected, reloading page...")
+        debug.log(f"[DATE SELECT] No date selected, reloading page (mode={mode})...")
         try:
             mark_bot_reload()
             await tab.reload()
@@ -1830,6 +1834,12 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
         target_area = None  # Skip selection when no options available
     else:
         target_area = util.get_target_item_from_matched_list(matched_blocks, auto_select_mode)
+
+    # Batch 2 (S-2): record area-select outcome for smart-mode state machine.
+    # MISS = no clickable area found this cycle; HIT branch below records on success.
+    if not target_area:
+        record_area_outcome(found=False, config_dict=config_dict)
+
     if target_area:
         # T013: Log selected area with selection type
         if debug.enabled:
@@ -1860,14 +1870,19 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
             except:
                 pass
 
+        # Batch 2 (S-2): record HIT for smart-mode state machine.
+        record_area_outcome(found=True, config_dict=config_dict)
+
     # Auto refresh if needed (simple wait mode, consistent with TicketPlus/iBon/FamiTicket)
     if is_need_refresh:
-        interval = config_dict["advanced"].get("auto_reload_page_interval", 0)
+        # Batch 2 (S-3): pick interval based on smart-mode state.
+        mode = get_effective_mode(config_dict)
+        interval = get_effective_reload_interval(config_dict)
         if interval > 0:
-            debug.log(f"[AREA SELECT] Waiting {interval}s before reload...")
+            debug.log(f"[AREA SELECT] Waiting {interval}s before reload (mode={mode})...")
             await asyncio.sleep(interval)
 
-        debug.log(f"[AREA SELECT] Page reloading...")
+        debug.log(f"[AREA SELECT] Page reloading (mode={mode})...")
         try:
             mark_bot_reload()
             await tab.reload()

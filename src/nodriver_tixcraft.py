@@ -621,6 +621,16 @@ async def reload_config(config_dict, last_mtime):
                         if field in new_config["advanced"]:
                             config_dict["advanced"][field] = new_config["advanced"][field]
 
+                    # Batch 2: smart_mode is nested — merge field-by-field so live
+                    # state doesn't lose any sub-keys when only one was edited.
+                    if "smart_mode" in new_config["advanced"] and isinstance(new_config["advanced"]["smart_mode"], dict):
+                        if "smart_mode" not in config_dict["advanced"] or not isinstance(config_dict["advanced"].get("smart_mode"), dict):
+                            config_dict["advanced"]["smart_mode"] = {}
+                        sm_fields = ["enable", "hunting_reload_interval", "waiting_reload_interval", "transition_threshold"]
+                        for field in sm_fields:
+                            if field in new_config["advanced"]["smart_mode"]:
+                                config_dict["advanced"]["smart_mode"][field] = new_config["advanced"]["smart_mode"][field]
+
                 print("Configuration reloaded from settings.json")
                 return config_dict, current_mtime
     except Exception as e:

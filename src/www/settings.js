@@ -71,6 +71,10 @@ const action_speed_multiplier = document.querySelector('#action_speed_multiplier
 const ocr_retry_cooldown = document.querySelector('#ocr_retry_cooldown');
 const post_submit_reload_guard_seconds = document.querySelector('#post_submit_reload_guard_seconds');
 const ticket_number_allow_max_fallback = document.querySelector('#ticket_number_allow_max_fallback');
+const smart_mode_enable = document.querySelector('#smart_mode_enable');
+const smart_mode_hunting_reload_interval = document.querySelector('#smart_mode_hunting_reload_interval');
+const smart_mode_waiting_reload_interval = document.querySelector('#smart_mode_waiting_reload_interval');
+const smart_mode_transition_threshold = document.querySelector('#smart_mode_transition_threshold');
 const show_timing_log = document.querySelector('#show_timing_log');
 const reset_browser_interval = document.querySelector('#reset_browser_interval');
 const server_port = document.querySelector('#server_port');
@@ -331,6 +335,24 @@ function load_settins_to_form(settings)
         if (ticket_number_allow_max_fallback) {
             const flag = settings.advanced.ticket_number_allow_max_fallback;
             ticket_number_allow_max_fallback.checked = (flag === undefined || flag === null) ? true : !!flag;
+        }
+        // Batch 2: smart_mode load (nested object)
+        const sm = (settings.advanced && settings.advanced.smart_mode) || {};
+        if (smart_mode_enable) {
+            const flag = sm.enable;
+            smart_mode_enable.checked = (flag === undefined || flag === null) ? true : !!flag;
+        }
+        if (smart_mode_hunting_reload_interval) {
+            const v = sm.hunting_reload_interval;
+            smart_mode_hunting_reload_interval.value = (v === undefined || v === null) ? 0.1 : v;
+        }
+        if (smart_mode_waiting_reload_interval) {
+            const v = sm.waiting_reload_interval;
+            smart_mode_waiting_reload_interval.value = (v === undefined || v === null) ? 2.0 : v;
+        }
+        if (smart_mode_transition_threshold) {
+            const v = sm.transition_threshold;
+            smart_mode_transition_threshold.value = (v === undefined || v === null) ? 3 : v;
         }
         if (show_timing_log) {
             const flag = settings.advanced.show_timing_log;
@@ -616,6 +638,25 @@ function save_changes_to_dict(silent_flag)
             }
             if (ticket_number_allow_max_fallback) {
                 settings.advanced.ticket_number_allow_max_fallback = !!ticket_number_allow_max_fallback.checked;
+            }
+            // Batch 2: smart_mode save (nested object)
+            if (!settings.advanced.smart_mode || typeof settings.advanced.smart_mode !== 'object') {
+                settings.advanced.smart_mode = {};
+            }
+            if (smart_mode_enable) {
+                settings.advanced.smart_mode.enable = !!smart_mode_enable.checked;
+            }
+            if (smart_mode_hunting_reload_interval) {
+                const raw = parseFloat(smart_mode_hunting_reload_interval.value);
+                settings.advanced.smart_mode.hunting_reload_interval = (Number.isFinite(raw) && raw >= 0.05 && raw <= 60) ? raw : 0.1;
+            }
+            if (smart_mode_waiting_reload_interval) {
+                const raw = parseFloat(smart_mode_waiting_reload_interval.value);
+                settings.advanced.smart_mode.waiting_reload_interval = (Number.isFinite(raw) && raw >= 0.5 && raw <= 60) ? raw : 2.0;
+            }
+            if (smart_mode_transition_threshold) {
+                const raw = parseInt(smart_mode_transition_threshold.value, 10);
+                settings.advanced.smart_mode.transition_threshold = (Number.isFinite(raw) && raw >= 1 && raw <= 20) ? raw : 3;
             }
             if (show_timing_log) {
                 settings.advanced.show_timing_log = !!show_timing_log.checked;
@@ -1456,26 +1497,31 @@ const noReloadStatusText = document.querySelector('#noReloadStatusText');
 
 async function refreshNoReloadStatus() {
     if (!noReloadToggleBtn || !noReloadStatusText) return;
+    // Use Bootstrap text utility classes so colours auto-adapt to light/dark theme.
+    const clearStatusColors = () => {
+        noReloadStatusText.classList.remove('text-success', 'text-warning', 'text-danger', 'fw-bold');
+        noReloadStatusText.style.color = '';
+        noReloadStatusText.style.fontWeight = '';
+    };
     try {
         const resp = await fetch('/api/no-reload');
         const data = await resp.json();
+        clearStatusColors();
         if (data.active) {
             noReloadToggleBtn.textContent = '🔓 恢復 auto reload';
-            noReloadToggleBtn.className = 'btn btn-danger';
-            noReloadStatusText.textContent = '目前狀態：🔒 已暫停（bot 不會自動 reload）';
-            noReloadStatusText.style.color = '#dc3545';
-            noReloadStatusText.style.fontWeight = 'bold';
+            noReloadToggleBtn.className = 'btn btn-danger btn-sm';
+            noReloadStatusText.textContent = '目前狀態：🔒 已暫停(bot 不會自動 reload)';
+            noReloadStatusText.classList.add('text-danger', 'fw-bold');
         } else {
             noReloadToggleBtn.textContent = '🔒 暫停 auto reload';
-            noReloadToggleBtn.className = 'btn btn-warning';
+            noReloadToggleBtn.className = 'btn btn-warning btn-sm';
             noReloadStatusText.textContent = '目前狀態：🔓 正常運作';
-            noReloadStatusText.style.color = '';
-            noReloadStatusText.style.fontWeight = 'normal';
+            noReloadStatusText.classList.add('text-success');
         }
     } catch (e) {
-        noReloadStatusText.textContent = '目前狀態：查詢失敗（請檢查 bot 是否在執行中）';
-        noReloadStatusText.style.color = '#dc3545';
-        noReloadStatusText.style.fontWeight = 'normal';
+        clearStatusColors();
+        noReloadStatusText.textContent = '目前狀態：查詢失敗(請檢查 bot 是否在執行中)';
+        noReloadStatusText.classList.add('text-danger');
     }
 }
 
@@ -1492,6 +1538,65 @@ if (noReloadToggleBtn) {
     });
     refreshNoReloadStatus();
     setInterval(refreshNoReloadStatus, 5000);
+}
+
+
+// ============================================================
+// Batch 2: Smart hunting/waiting mode state + forced override
+// ============================================================
+const smartModeText = document.querySelector('#smartModeText');
+const smartModeForceSelect = document.querySelector('#smartModeForceSelect');
+
+async function refreshSmartModeStatus() {
+    if (!smartModeText) return;
+    // Use Bootstrap text utility classes so colours auto-adapt to light/dark theme.
+    const clearColorClasses = () => {
+        smartModeText.classList.remove('text-success', 'text-warning', 'text-danger', 'text-info');
+    };
+    try {
+        const resp = await fetch('/api/smart-mode');
+        const data = await resp.json();
+        let modeLabel = '';
+        clearColorClasses();
+        if (data.current_mode === 'hunting') {
+            modeLabel = `🎯 狩獵模式 (連續 miss: ${data.consecutive_misses || 0})`;
+            smartModeText.classList.add('text-success');
+        } else if (data.current_mode === 'waiting') {
+            modeLabel = '⏸ 等待模式(套用秒級暫停)';
+            smartModeText.classList.add('text-warning');
+        } else {
+            modeLabel = data.current_mode || '未知';
+        }
+        if (data.forced_mode && data.forced_mode !== 'auto') {
+            modeLabel += ' 【手動強制】';
+        }
+        smartModeText.textContent = modeLabel;
+        if (smartModeForceSelect && smartModeForceSelect.value !== (data.forced_mode || 'auto')) {
+            smartModeForceSelect.value = data.forced_mode || 'auto';
+        }
+    } catch (e) {
+        clearColorClasses();
+        smartModeText.classList.add('text-danger');
+        smartModeText.textContent = '查詢失敗(請檢查 bot 是否在執行中)';
+    }
+}
+
+if (smartModeForceSelect) {
+    smartModeForceSelect.addEventListener('change', async () => {
+        try {
+            const formData = new FormData();
+            formData.append('forced_mode', smartModeForceSelect.value);
+            await fetch('/api/smart-mode', { method: 'POST', body: formData });
+            await refreshSmartModeStatus();
+        } catch (e) {
+            console.error('Failed to set forced_mode:', e);
+        }
+    });
+}
+
+if (smartModeText) {
+    refreshSmartModeStatus();
+    setInterval(refreshSmartModeStatus, 2000);
 }
 
 

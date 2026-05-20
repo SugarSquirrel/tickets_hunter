@@ -82,6 +82,227 @@ def remove_no_reload_marker():
         pass
     return False
 
+
+# ===== Smart-mode state machine (Batch 2) =====
+# Two-mode system: "hunting" (fast reload, ignore second-pause keywords)
+# vs "waiting" (slow reload, honour second-pause). Bot decides mode based on
+# consecutive area-select misses; UI can override via forced_mode.
+#
+# Cross-process design: bot subprocess and settings.py Tornado server are
+# separate Python processes, so module-level dicts are NOT shared. We mirror
+# state to two files in the source dir:
+#   - MAXBOT_SMART_MODE.json  — bot writes (current_mode/misses/timestamp)
+#   - MAXBOT_FORCED_MODE.txt  — server writes (auto|hunting|waiting)
+# Both processes read these files for cross-process consistent decisions.
+
+_smart_mode_state = {
+    "current_mode": "hunting",       # "hunting" or "waiting"
+    "consecutive_misses": 0,         # miss counter (reset on hit)
+    "last_mode_change_at": 0.0,      # timestamp of last mode transition
+    "forced_mode": "auto",           # "auto" | "hunting" | "waiting"
+}
+
+
+def _smart_state_file_path():
+    return os.path.join(os.path.dirname(os.path.realpath(__file__)), "MAXBOT_SMART_MODE.json")
+
+
+def _forced_mode_file_path():
+    return os.path.join(os.path.dirname(os.path.realpath(__file__)), "MAXBOT_FORCED_MODE.txt")
+
+
+def _persist_smart_state():
+    """Write bot-owned fields to MAXBOT_SMART_MODE.json. Never raises."""
+    try:
+        payload = {
+            "current_mode": _smart_mode_state.get("current_mode", "hunting"),
+            "consecutive_misses": _smart_mode_state.get("consecutive_misses", 0),
+            "last_mode_change_at": _smart_mode_state.get("last_mode_change_at", 0.0),
+        }
+        with open(_smart_state_file_path(), "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+    except Exception:
+        pass
+
+
+def _load_persisted_smart_state():
+    """Read MAXBOT_SMART_MODE.json. Returns dict with safe defaults on any error."""
+    defaults = {"current_mode": "hunting", "consecutive_misses": 0, "last_mode_change_at": 0.0}
+    try:
+        path = _smart_state_file_path()
+        if not os.path.exists(path):
+            return defaults
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return {
+            "current_mode": data.get("current_mode", "hunting") if data.get("current_mode") in ("hunting", "waiting") else "hunting",
+            "consecutive_misses": int(data.get("consecutive_misses", 0) or 0),
+            "last_mode_change_at": float(data.get("last_mode_change_at", 0.0) or 0.0),
+        }
+    except Exception:
+        return defaults
+
+
+def _read_forced_mode():
+    """Read MAXBOT_FORCED_MODE.txt. Returns 'auto' if missing or invalid."""
+    try:
+        path = _forced_mode_file_path()
+        if not os.path.exists(path):
+            return "auto"
+        with open(path, "r", encoding="utf-8") as f:
+            val = (f.read() or "").strip().lower()
+        return val if val in ("auto", "hunting", "waiting") else "auto"
+    except Exception:
+        return "auto"
+
+
+def _write_forced_mode(mode):
+    """Write MAXBOT_FORCED_MODE.txt (or remove it if mode == 'auto'). Never raises."""
+    try:
+        path = _forced_mode_file_path()
+        if mode == "auto":
+            if os.path.exists(path):
+                os.remove(path)
+        else:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(mode)
+    except Exception:
+        pass
+
+
+def get_smart_mode_state():
+    """Return current smart-mode state (cross-process consistent).
+
+    Reads forced_mode from txt file, current_mode/misses from json file.
+    Falls back to in-memory state when files are unavailable.
+    """
+    persisted = _load_persisted_smart_state()
+    forced = _read_forced_mode()
+    return {
+        "current_mode": persisted["current_mode"],
+        "consecutive_misses": persisted["consecutive_misses"],
+        "last_mode_change_at": persisted["last_mode_change_at"],
+        "forced_mode": forced,
+    }
+
+
+def get_effective_mode(config_dict):
+    """Return the effective mode considering forced_mode override.
+
+    Returns "hunting" or "waiting".
+    If smart_mode.enable is False, always returns "hunting" (= existing behaviour).
+    """
+    try:
+        enable = config_dict.get("advanced", {}).get("smart_mode", {}).get("enable", True)
+        if not enable:
+            return "hunting"
+        forced = _read_forced_mode()
+        if forced in ("hunting", "waiting"):
+            return forced
+        # Cross-process: prefer file-backed current_mode so server-side callers
+        # (e.g. settings.py second-pause gate) see what the bot decided.
+        persisted = _load_persisted_smart_state()
+        return persisted["current_mode"]
+    except Exception:
+        return "hunting"
+
+
+def record_area_outcome(found, config_dict):
+    """Called after each area_auto_select cycle (bot side only).
+
+    Args:
+        found: True if bot clicked an area (hit), False otherwise (miss)
+        config_dict: full config dict for reading threshold
+    """
+    try:
+        if not config_dict.get("advanced", {}).get("smart_mode", {}).get("enable", True):
+            return  # smart mode disabled, no-op
+
+        # If user forced a specific mode via UI, don't auto-transition
+        if _read_forced_mode() in ("hunting", "waiting"):
+            return
+
+        sm = config_dict.get("advanced", {}).get("smart_mode", {})
+        try:
+            threshold = int(sm.get("transition_threshold", 3))
+            if threshold < 1 or threshold > 20:
+                threshold = 3
+        except (TypeError, ValueError):
+            threshold = 3
+
+        current = _smart_mode_state["current_mode"]
+
+        if found:
+            if _smart_mode_state["consecutive_misses"] > 0:
+                _smart_mode_state["consecutive_misses"] = 0
+            if current == "waiting":
+                _smart_mode_state["current_mode"] = "hunting"
+                _smart_mode_state["last_mode_change_at"] = time.time()
+                print(f"[SMART] Mode switched: waiting → hunting (valid area found)")
+            _persist_smart_state()
+        else:
+            _smart_mode_state["consecutive_misses"] += 1
+            misses = _smart_mode_state["consecutive_misses"]
+            if current == "hunting" and misses >= threshold:
+                _smart_mode_state["current_mode"] = "waiting"
+                _smart_mode_state["last_mode_change_at"] = time.time()
+                print(f"[SMART] Mode switched: hunting → waiting ({misses} consecutive misses, threshold={threshold})")
+            elif current == "hunting" and misses >= max(1, threshold - 1):
+                # Only chirp when approaching threshold, to avoid log spam
+                print(f"[SMART] Hunting: {misses}/{threshold} consecutive misses")
+            _persist_smart_state()
+    except Exception as exc:
+        print(f"[SMART] record_area_outcome error (non-fatal): {exc}")
+
+
+def set_forced_mode(mode):
+    """Manually set forced_mode. Returns the new effective forced_mode.
+
+    Called from the server-side /api/smart-mode POST handler. Writes the
+    marker file so the bot subprocess can read the override.
+    """
+    if mode not in ("auto", "hunting", "waiting"):
+        mode = "auto"
+    _smart_mode_state["forced_mode"] = mode
+    _write_forced_mode(mode)
+    if mode in ("hunting", "waiting"):
+        # Apply forced mode immediately to local _smart_mode_state too
+        if _smart_mode_state["current_mode"] != mode:
+            _smart_mode_state["current_mode"] = mode
+            _smart_mode_state["last_mode_change_at"] = time.time()
+            _smart_mode_state["consecutive_misses"] = 0
+            _persist_smart_state()
+        print(f"[SMART] Mode forced: → {mode}")
+    else:
+        print(f"[SMART] Mode forced: → auto (resume automatic switching)")
+    return mode
+
+
+def get_effective_reload_interval(config_dict):
+    """Return the reload interval based on current effective mode.
+
+    If smart mode is disabled, returns existing auto_reload_page_interval.
+    """
+    try:
+        if not config_dict.get("advanced", {}).get("smart_mode", {}).get("enable", True):
+            return float(config_dict.get("advanced", {}).get("auto_reload_page_interval", 0) or 0)
+
+        mode = get_effective_mode(config_dict)
+        sm = config_dict.get("advanced", {}).get("smart_mode", {})
+        raw = sm.get("hunting_reload_interval", 0.1) if mode == "hunting" else sm.get("waiting_reload_interval", 2.0)
+
+        try:
+            val = float(raw)
+            if val < 0:
+                val = 0
+            if val > 60:
+                val = 60
+            return val
+        except (TypeError, ValueError):
+            return 2.0
+    except Exception:
+        return float(config_dict.get("advanced", {}).get("auto_reload_page_interval", 0) or 0)
+
 CONST_FROM_TOP_TO_BOTTOM = "from top to bottom"
 CONST_FROM_BOTTOM_TO_TOP = "from bottom to top"
 CONST_CENTER = "center"

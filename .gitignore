@@ -11,11 +11,17 @@ __pycache__/
 
 # Sensitive config files
 /src/settings.json
-/src/MAXBOT_LAST_URL.txt
-/src/MAXBOT_INT28_IDLE.txt
-/src/MAXBOT_QUESTION.txt
 src/webdriver/*/data/settings.json
 src/webdriver/*/data/status.json
+
+# MaxBot runtime state files (do NOT commit)
+# Covers: MAXBOT_INT28_IDLE / MAXBOT_NO_RELOAD / MAXBOT_LAST_URL /
+# MAXBOT_SMART_MODE / MAXBOT_FORCED_MODE / MAXBOT_ONLINE_ANSWER /
+# MAXBOT_QUESTION and any future MAXBOT_* runtime markers.
+MAXBOT_*.txt
+MAXBOT_*.json
+src/MAXBOT_*.txt
+src/MAXBOT_*.json
 # Named presets contain account credentials per profile — never upload
 /src/presets/
 /presets/

@@ -694,8 +694,6 @@
                     <tr><td><code>{date}</code></td><td>2026-05-10</td><td>觸發當下的日期 YYYY-MM-DD</td></tr>
                     <tr><td><code>{datetime}</code></td><td>2026-05-10 14:09:53</td><td>完整日期 + 時間</td></tr>
                     <tr><td><code>{account}</code></td><td>alice@example.com<br>session-3f9a2c1b</td><td>有帳號欄位的平台會直接顯示帳號（KKTIX/TicketPlus/KHAM/Cityline/HKTicketing 等）。<br>TixCraft / iBon / FunOne 只存登入 cookie，會顯示一段 SHA-256 指紋（同 cookie → 同指紋）讓你辨識是哪個帳號，不會洩漏 cookie 內容</td></tr>
-                    <tr><td><code>{event_name}</code></td><td>DXS [SERENADE] ON STAGE - KAOHSIUNG</td><td>從瀏覽器頁面標題（<code>document.title</code>）抓取，自動清掉「| tixcraft」「- KKTIX」這類站名後綴。若標題已切到結帳頁、不再顯示活動名，可能會變成「Checkout / 結帳」</td></tr>
-                    <tr><td><code>{url}</code></td><td>https://tixcraft.com/ticket/checkout</td><td>觸發通知當下的頁面網址，可以從手機通知直接點連結回去結帳</td></tr>
                     <tr><td><code>{ticket_count}</code></td><td>2</td><td>通知時選到的張數。目前支援 TixCraft、KKTIX、KHAM；若頁面抓不到，會使用設定中的購票張數</td></tr>
                   </tbody>
                 </table>
@@ -737,7 +735,7 @@
         <div class="row mb-3">
           <label for="ocr_retry_cooldown" class="col-sm-2 col-form-label">OCR 失敗冷卻(秒)</label>
           <div class="col-sm-10 col-lg-8 col-xl-6">
-            <input class="form-control" id="ocr_retry_cooldown" type="number" step="0.1" min="0" max="60" value="2.5" />
+            <input class="form-control highlight-field" id="ocr_retry_cooldown" type="number" step="0.1" min="0" max="60" value="2.5" />
             <small class="form-text text-muted d-block mt-1">
               驗證碼連續錯 3 次後等待新驗證碼的秒數。預設 <strong>2.5</strong>；可設 <strong>0.5</strong> 加快重試節奏；<strong>0</strong> 跳過冷卻；範圍 0~60。
             </small>
@@ -753,6 +751,76 @@
             </div>
             <small class="form-text text-muted d-block mt-1">
               當設定購買 N 張但選單沒有 N 時：勾選 = 自動挑「最大可用值」（例如想買 4 但只剩 2 → 買 2）；取消 = 嚴格模式，找不到精準張數就 reload 重試。預設 <strong>勾選</strong>。
+            </small>
+          </div>
+        </div>
+
+        <div class="row mb-3">
+          <div class="col-12">
+            <div class="card border-primary">
+              <div class="card-header bg-primary text-white py-2">
+                <span class="badge bg-warning text-dark me-2">✨ 特殊功能</span>
+                <strong>智慧模式 — 自動「狩獵/等待」切換</strong>
+              </div>
+              <div class="card-body">
+                <p class="mb-2 small">
+                  <strong>為什麼需要這個？</strong>搶票尖峰過後若 bot 仍持續以 0.1 秒高頻刷頁，
+                  會被拓元等售票網站判定為異常流量，最壞情況會被封鎖帳號或 IP。
+                  智慧模式會在「找得到區」時用高頻刷新搶票，在「連續找不到區」時自動切換到較慢的刷新，
+                  避免帳號被誤判。<strong class="text-primary">強烈建議保持開啟。</strong>
+                </p>
+                <details class="small mb-0">
+                  <summary style="cursor:pointer;">📖 詳細說明（點擊展開）</summary>
+                  <div class="mt-2">
+                    <ul class="mb-2 ps-3">
+                      <li><strong>狩獵模式</strong>：依「狩獵 reload 間隔」設定快速刷新；此時不套用「秒數暫停關鍵字」</li>
+                      <li><strong>等待模式</strong>：依「等待 reload 間隔」設定放慢刷新（保護帳號）；此時套用「秒數暫停/繼續關鍵字」</li>
+                      <li><strong>切換時機</strong>：連續 N 次找不到符合 area_keyword 的可選區 → 轉等待；找到並點到 → 立即轉狩獵</li>
+                    </ul>
+                    <p class="mb-0"><strong>關閉這個功能會發生什麼？</strong>bot 永遠以「自動刷新頁面間隔」刷新，秒數暫停關鍵字一律生效（行為與舊版相同）。如果你已透過「秒數暫停」自己控制刷新節奏，可關閉。</p>
+                  </div>
+                </details>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="row mb-3">
+          <label class="col-sm-2 col-form-label">智慧模式啟用</label>
+          <div class="col-sm-10 col-lg-8 col-xl-6">
+            <div class="form-check form-switch">
+              <input class="form-check-input highlight-field" type="checkbox" id="smart_mode_enable" checked>
+              <label class="form-check-label fw-bold" for="smart_mode_enable">啟用自動狩獵/等待切換（建議開啟以保護帳號）</label>
+            </div>
+          </div>
+        </div>
+
+        <div class="row mb-3">
+          <label for="smart_mode_hunting_reload_interval" class="col-sm-2 col-form-label">狩獵 reload 間隔(秒)</label>
+          <div class="col-sm-10 col-lg-8 col-xl-6">
+            <input class="form-control highlight-field" id="smart_mode_hunting_reload_interval" type="number" step="0.1" min="0.05" max="60" value="0.1" />
+            <small class="form-text text-muted d-block mt-1">
+              狩獵模式（搶票中）找不到符合條件的區時，間隔多久再刷新一次。預設 <strong>0.1</strong>；過快可能被偵測為異常流量。範圍 0.05~60。
+            </small>
+          </div>
+        </div>
+
+        <div class="row mb-3">
+          <label for="smart_mode_waiting_reload_interval" class="col-sm-2 col-form-label">等待 reload 間隔(秒)</label>
+          <div class="col-sm-10 col-lg-8 col-xl-6">
+            <input class="form-control highlight-field" id="smart_mode_waiting_reload_interval" type="number" step="0.5" min="0.5" max="60" value="2.0" />
+            <small class="form-text text-muted d-block mt-1">
+              等待模式（持續找不到區，已切到守備節奏）下的刷新間隔。預設 <strong>2.0</strong>；不要設太短以免重新被誤判。範圍 0.5~60。
+            </small>
+          </div>
+        </div>
+
+        <div class="row mb-3">
+          <label for="smart_mode_transition_threshold" class="col-sm-2 col-form-label">轉換門檻(次)</label>
+          <div class="col-sm-10 col-lg-8 col-xl-6">
+            <input class="form-control highlight-field" id="smart_mode_transition_threshold" type="number" step="1" min="1" max="20" value="3" />
+            <small class="form-text text-muted d-block mt-1">
+              連續幾次找不到符合條件的區，才從狩獵轉等待。預設 <strong>3</strong>（接近門檻時 console 會印 <code>[SMART] Hunting: 2/3</code> 提示）。範圍 1~20。
             </small>
           </div>
         </div>
@@ -1295,40 +1363,6 @@
         </div>
 
         <div class="row mb-3">
-          <label class="col-sm-2 col-form-label">搶票尖峰救援</label>
-          <div class="col-sm-10 col-lg-8 col-xl-6">
-            <div class="alert alert-warning mt-0" role="alert">
-              <div class="d-flex align-items-start">
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-exclamation-triangle-fill me-2 flex-shrink-0 mt-1" viewBox="0 0 16 16">
-                  <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
-                </svg>
-                <div class="flex-grow-1">
-                  <strong>尖峰時刻才用的救援按鈕</strong>
-                  <div class="mt-2">
-                    <button type="button" id="noReloadToggleBtn" class="btn btn-warning btn-sm">🔒 暫停 auto reload</button>
-                    <span id="noReloadStatusText" class="ms-2">目前狀態：查詢中…</span>
-                  </div>
-                  <p class="mb-0 mt-2">
-                    <strong>使用情境：</strong>搶票尖峰 server 可能 2 分鐘以上才回應。按下「暫停」後 bot 永不 reload（仍照常處理頁面），直到 URL 進到區域/訂單/結帳頁自動恢復，或手動按「恢復」。
-                  </p>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="row mb-3">
-          <label for="post_submit_reload_guard_seconds" class="col-sm-2 col-form-label">送出後 reload 護欄(秒)</label>
-          <div class="col-sm-10 col-lg-8 col-xl-6">
-            <input class="form-control" id="post_submit_reload_guard_seconds" type="number" step="1" min="0" max="600" value="180" />
-            <small class="form-text text-muted d-block mt-1">
-              驗證碼表單成功送出後，禁止 reload 的秒數，讓 server 自然 redirect 到付款頁。預設 <strong>180</strong>（含搶票尖峰 buffer）；<strong>0</strong> = 關閉護欄（不建議，可能取消 in-flight 訂單）；範圍 0~600。<br>
-              <strong>從舊版升級的使用者注意：</strong>若你之前手動存過 15，建議手動改成 180。
-            </small>
-          </div>
-        </div>
-
-        <div class="row mb-3">
           <label for="idle_keyword" class="col-sm-2 col-form-label">系統時間 - <span class="text-danger">暫停</span>關鍵字<span class="help-icon" data-help="idle_keyword" title="系統時間暫停關鍵字說明" tabindex="0" role="button" aria-label="系統時間暫停關鍵字 說明"></span></label>
           <div class="col-sm-10 col-lg-8 col-xl-6">
             <input type="text" class="form-control" id="idle_keyword" placeholder="例如：09:30:00;14:15:30">
@@ -1414,6 +1448,86 @@
           </div>
         </div>
 
+        <div class="row mb-3">
+          <label class="col-sm-2 col-form-label">智慧模式狀態</label>
+          <div class="col-sm-10 col-lg-8 col-xl-6">
+            <div class="card border-primary">
+              <div class="card-header bg-primary text-white py-2">
+                <strong>🎯 智慧模式狀態</strong>
+              </div>
+              <div class="card-body">
+                <div class="fs-5"><strong>目前模式：<span id="smartModeText">查詢中…</span></strong></div>
+                <div class="mt-2 d-flex align-items-center flex-wrap gap-2">
+                  <label for="smartModeForceSelect" class="mb-0">手動覆寫：</label>
+                  <select id="smartModeForceSelect" class="form-select form-select-sm highlight-field" style="width: auto;">
+                    <option value="auto" selected>自動(依偵測切換)</option>
+                    <option value="hunting">強制狩獵模式</option>
+                    <option value="waiting">強制等待模式</option>
+                  </select>
+                </div>
+                <details class="mt-2 small mb-0">
+                  <summary style="cursor:pointer;">📖 這個區塊跟「進階設定 → 智慧模式」有什麼不一樣？</summary>
+                  <div class="mt-2">
+                    <ul class="mb-2 ps-3">
+                      <li><strong>進階設定 → 智慧模式</strong>：設定<u>規則</u>(多久刷新一次、幾次失敗才切等待、是否啟用)。改完要存檔，bot 抓設定後生效。</li>
+                      <li><strong>這裡(執行階段 → 狀態)</strong>：看 bot <u>目前</u>處於哪個模式(每 2 秒更新一次)，並可在執行中即時用下拉「手動覆寫」強制切換 — 不需要重啟 bot。</li>
+                    </ul>
+                    <p class="mb-2"><strong>什麼時候用「手動覆寫」？</strong></p>
+                    <ul class="mb-0 ps-3">
+                      <li><strong>強制狩獵</strong>：開賣前你已經 stand by 在活動頁，bot 還沒偵測到票，但你知道馬上要開賣 → 強制狩獵讓 bot 全速刷新</li>
+                      <li><strong>強制等待</strong>：搶票過後沒搶到，你想留著 bot 守備等候缺貨補位 → 強制等待，避免高頻刷頁被 ban</li>
+                      <li><strong>自動</strong>：依 bot 偵測自動切換(最常用)</li>
+                    </ul>
+                  </div>
+                </details>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="row mb-3">
+          <label class="col-sm-2 col-form-label">搶票尖峰救援</label>
+          <div class="col-sm-10 col-lg-8 col-xl-6">
+            <div class="alert alert-warning mt-0" role="alert">
+              <div class="d-flex align-items-start">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-exclamation-triangle-fill me-2 flex-shrink-0 mt-1" viewBox="0 0 16 16">
+                  <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
+                </svg>
+                <div class="flex-grow-1">
+                  <strong>尖峰時刻才用的「禁刷新」緊急開關</strong>
+                  <div class="mt-2">
+                    <button type="button" id="noReloadToggleBtn" class="btn btn-warning btn-sm">🔒 暫停 auto reload</button>
+                    <span id="noReloadStatusText" class="ms-2">目前狀態：查詢中…</span>
+                  </div>
+                  <details class="mt-2 small">
+                    <summary style="cursor:pointer;">📖 什麼時候要按這個按鈕？跟「智慧模式」有什麼不同？</summary>
+                    <div class="mt-2">
+                      <p class="mb-2"><strong>使用情境：</strong>搶票最尖峰時 server 可能塞到 <u>2 分鐘以上</u>才回應。這時 bot 若繼續刷新，會打斷正在處理中的訂單（可能讓你已選的票被釋出）。按下「暫停」後 bot 永不刷新（但仍會處理頁面、選區、填驗證碼），讓你已送出的請求自然完成。</p>
+                      <p class="mb-2"><strong>跟「智慧模式」的差別：</strong></p>
+                      <ul class="mb-2 ps-3">
+                        <li><strong>智慧模式</strong>：bot 自己依「找不找得到區」<u>自動</u>調節刷新節奏（大多數時候它就夠了）</li>
+                        <li><strong>這顆按鈕</strong>：完全<u>禁止</u>刷新的「核子按鈕」，由你手動觸發。等於告訴 bot「現在別搗亂，讓我手上的訂單跑完」</li>
+                      </ul>
+                      <p class="mb-0"><strong>自動恢復：</strong>當頁面 URL 進到區域選擇 / 訂單 / 結帳頁時，bot 會自動解除這個鎖（因為你的請求已成功）。或手動按下方按鈕恢復。</p>
+                    </div>
+                  </details>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="row mb-3">
+          <label for="post_submit_reload_guard_seconds" class="col-sm-2 col-form-label">送出後 reload 護欄(秒)</label>
+          <div class="col-sm-10 col-lg-8 col-xl-6">
+            <input class="form-control" id="post_submit_reload_guard_seconds" type="number" step="1" min="0" max="600" value="180" />
+            <small class="form-text text-muted d-block mt-1">
+              驗證碼表單成功送出後，禁止 reload 的秒數，讓 server 自然 redirect 到付款頁。預設 <strong>180</strong>（含搶票尖峰 buffer）；<strong>0</strong> = 關閉護欄（不建議，可能取消 in-flight 訂單）；範圍 0~600。<br>
+              <strong>從舊版升級的使用者注意：</strong>若你之前手動存過 15，建議手動改成 180。
+            </small>
+          </div>
+        </div>
+
       </div>
 
     </div>
@@ -1431,8 +1545,26 @@
         <span class="text-muted small ms-2" id="presets_status"></span>
       </div>
       <small class="form-text text-muted d-block mt-1">
-        為不同帳號存多份設定（例如「帳號A」「帳號B」），切換只要兩個 click。<strong>另存為</strong> 會把目前設定存成新的 preset；<strong>載入</strong> 會把 preset 覆蓋到 settings.json 並重新載入頁面（會影響搶票中的 bot！）；<strong>📝 編輯</strong> 載入到表單但不動 settings.json（適合搶票中編輯第二份設定）。檔案存在本機 <code>src/presets/</code>，不會上 GitHub。
+        為不同帳號或不同活動存多份設定（例如「帳號A」「帳號B」「演唱會X」），下次切換只要選下拉 → 按鈕一鍵切。
       </small>
+      <details class="mt-1">
+        <summary class="text-muted small" style="cursor:pointer;">📖 各按鈕怎麼用？（點擊展開詳細說明）</summary>
+        <div class="mt-2 small text-muted ps-3">
+          <ul class="mb-2 ps-3">
+            <li><strong>另存為…</strong>：把<u>目前表單上的設定</u>另存成一份新的 preset，會問你要取什麼名字。原本的 settings.json 不會被動到。</li>
+            <li><strong>載入</strong>：把選到的 preset <u>覆蓋</u>到 settings.json 並重新整理頁面。<strong style="color:#dc3545;">⚠️ 如果 bot 正在搶票，會被影響</strong>，請確認 bot 沒在跑再用。適合「日常切換不同帳號去搶票」。</li>
+            <li><strong>📝 編輯</strong>：把 preset 載入到表單<u>但不動 settings.json</u>，搶票中的 bot 完全不會受影響。適合「bot 正在搶 A 帳號，我想趁空檔修改 B 帳號的設定」。修改完按下方出現的「💾 存到 preset」存回去就好。</li>
+            <li><strong>刪除</strong>：移除選到的 preset 檔案。</li>
+          </ul>
+          <p class="mb-2"><strong>💡 典型使用流程：</strong></p>
+          <ol class="mb-2 ps-3">
+            <li>填好設定 → 按「另存為…」取名「帳號A」</li>
+            <li>改設定到帳號B → 再次「另存為…」取名「帳號B」</li>
+            <li>之後想用帳號A搶 → 從下拉選「帳號A」按「載入」→ 按搶票</li>
+          </ol>
+          <p class="mb-0">所有 preset 檔案存在本機 <code>src/presets/</code> 資料夾，不會上傳到 GitHub，可放心放敏感資訊。</p>
+        </div>
+      </details>
       <!-- Banner shown only while editing a non-active preset. -->
       <div class="alert alert-warning d-flex align-items-center flex-wrap gap-2 mt-2 mb-0" id="preset_edit_banner" role="alert" style="display:none;">
         <div class="flex-grow-1">

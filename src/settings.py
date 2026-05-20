@@ -226,6 +226,13 @@ def get_default_config():
     # When True (default), fall back to max available ticket count when the
     # exact requested count isn't selectable. False = strict mode (reload-retry).
     config_dict["advanced"]["ticket_number_allow_max_fallback"] = True
+    # Batch 2: smart hunting/waiting mode for tixcraft area-select reload pacing.
+    config_dict["advanced"]["smart_mode"] = {
+        "enable": True,
+        "hunting_reload_interval": 0.1,
+        "waiting_reload_interval": 2.0,
+        "transition_threshold": 3,
+    }
     config_dict["advanced"]["reset_browser_interval"] = 0
     config_dict["advanced"]["proxy_server_port"] = ""
     config_dict["advanced"]["window_size"] = "600,1024"
@@ -338,6 +345,13 @@ def migrate_config(config_dict):
         # they should manually bump it via the settings UI.
         config_dict["advanced"].setdefault("post_submit_reload_guard_seconds", 180.0)
         config_dict["advanced"].setdefault("ticket_number_allow_max_fallback", True)
+        # Batch 2: smart hunting/waiting mode.
+        config_dict["advanced"].setdefault("smart_mode", {})
+        if isinstance(config_dict["advanced"].get("smart_mode"), dict):
+            config_dict["advanced"]["smart_mode"].setdefault("enable", True)
+            config_dict["advanced"]["smart_mode"].setdefault("hunting_reload_interval", 0.1)
+            config_dict["advanced"]["smart_mode"].setdefault("waiting_reload_interval", 2.0)
+            config_dict["advanced"]["smart_mode"].setdefault("transition_threshold", 3)
 
     # Ensure all default fields exist (fills missing keys from new versions)
     default = get_default_config()
@@ -499,11 +513,20 @@ def change_maxbot_status_by_keyword():
             maxbot_resume()
     
     current_time = system_clock_data.strftime('%S')
+    # Batch 2 (S-4): gate the second-pause keyword to "waiting" mode only.
+    # During hunting mode the bot is in the 10-second grab window and
+    # mustn't be interrupted by a periodic second-pause. The gate only
+    # applies to the *pause* (idle) keyword — the *resume* keyword still
+    # runs unconditionally so a stuck pause can always recover.
     if len(config_dict["advanced"]["idle_keyword_second"]) > 0:
-        is_matched =  util.is_text_match_keyword(config_dict["advanced"]["idle_keyword_second"], current_time)
-        if is_matched:
-            #print("match to idle:", current_time)
-            maxbot_idle()
+        from nodriver_common import get_effective_mode
+        sm_enabled = config_dict.get("advanced", {}).get("smart_mode", {}).get("enable", True)
+        should_gate = sm_enabled and get_effective_mode(config_dict) != "waiting"
+        if not should_gate:
+            is_matched = util.is_text_match_keyword(config_dict["advanced"]["idle_keyword_second"], current_time)
+            if is_matched:
+                #print("match to idle:", current_time)
+                maxbot_idle()
     if len(config_dict["advanced"]["resume_keyword_second"]) > 0:
         is_matched =  util.is_text_match_keyword(config_dict["advanced"]["resume_keyword_second"], current_time)
         if is_matched:
@@ -601,6 +624,36 @@ class RunHandler(tornado.web.RequestHandler):
         print('run button pressed.')
         launch_maxbot()
         self.write({"run": True})
+
+class SmartModeHandler(tornado.web.RequestHandler):
+    """Batch 2 — Smart hunting/waiting mode state + forced override.
+
+    State is shared cross-process via MAXBOT_SMART_MODE.json (bot writes)
+    and MAXBOT_FORCED_MODE.txt (server writes via this handler).
+    """
+
+    def get(self):
+        from nodriver_common import get_smart_mode_state
+        state = get_smart_mode_state()
+        self.write({
+            "current_mode": state.get("current_mode", "hunting"),
+            "consecutive_misses": state.get("consecutive_misses", 0),
+            "forced_mode": state.get("forced_mode", "auto"),
+            "last_mode_change_at": state.get("last_mode_change_at", 0),
+        })
+
+    def post(self):
+        from nodriver_common import set_forced_mode, get_smart_mode_state
+        mode = self.get_argument("forced_mode", "auto")
+        if mode not in ("auto", "hunting", "waiting"):
+            mode = "auto"
+        set_forced_mode(mode)
+        state = get_smart_mode_state()
+        self.write({
+            "current_mode": state.get("current_mode", "hunting"),
+            "forced_mode": state.get("forced_mode", "auto"),
+        })
+
 
 class NoReloadToggleHandler(tornado.web.RequestHandler):
     """Bug 1.6-ⓘ Layer C UI: toggle the MAXBOT_NO_RELOAD.txt marker file.
@@ -1180,6 +1233,7 @@ async def main_server():
         ("/resume", ResumeHandler),
         ("/run", RunHandler),
         ("/api/no-reload", NoReloadToggleHandler),
+        ("/api/smart-mode", SmartModeHandler),
         
         # json api
         ("/load", LoadJsonHandler),
