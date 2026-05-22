@@ -348,10 +348,20 @@
           <label for="refresh_datetime" class="col-sm-2 col-form-label">刷新在指定時間<span class="help-icon" data-help="refresh_datetime" title="刷新在指定時間說明" tabindex="0" role="button" aria-label="刷新在指定時間 說明"></span>
           </label>
           <div class="col-sm-10 col-lg-8 col-xl-6">
-            <input class="form-control highlight-field" id="refresh_datetime" value="" placeholder="2026/05/16 12:00:00.000 或 12:00:00.5" />
-            <small class="form-text text-muted d-block mt-1">
-              支援小數秒，例如 <code>11:59:59.9</code> 或 <code>2026/05/16 12:00:00.500</code>，精度可達毫秒。
-            </small>
+            <input class="form-control highlight-field" id="refresh_datetime" value="" placeholder="2026/05/16 12:00:00" />
+            <details class="mt-2">
+              <summary class="text-muted small" style="cursor:pointer;">📖 使用說明 — 該填什麼？(點擊展開)</summary>
+              <div class="alert alert-info py-2 mt-2 mb-0 small">
+                <strong>直接填官方開賣時間就好。</strong>
+                <ul class="mb-1 mt-1 ps-3">
+                  <li>例如官方寫 12:00 開賣 → 填 <code>12:00:00</code> 或 <code>2026/05/22 12:00:00</code></li>
+                  <li><strong>不用</strong>再手動寫 <code>11:59:59.7</code> — bot 會自己量網路 RTT，自動把觸發時間往前挪，讓 GET 剛好抵達 server 時是開賣時刻(由「進階設定 → 網路自適應 → RTT 補償」處理)</li>
+                  <li>想自己微調也可以：支援毫秒精度，例如 <code>11:59:59.950</code>。若已手寫補償，建議到進階設定<u>關閉</u>「RTT 自動補償」避免疊加</li>
+                  <li>留空 = 不啟用此功能(程式啟動後立即開始搶)</li>
+                </ul>
+                <span class="text-muted">建議開賣前 30 秒以上打開活動頁，讓 bot 累積網路樣本(在「執行階段 → 網路狀態」可看到「樣本」≥ 3 即可)。</span>
+              </div>
+            </details>
           </div>
         </div>
 
