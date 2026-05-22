@@ -233,6 +233,14 @@ def get_default_config():
         "waiting_reload_interval": 2.0,
         "transition_threshold": 3,
     }
+    # Batch 3: passive network telemetry-driven compensation + backoff.
+    config_dict["advanced"]["network"] = {
+        "rtt_compensation_enable": True,
+        "compensation_max_ms": 1000,
+        "dynamic_backoff_enable": True,
+        "backoff_max_seconds": 30.0,
+        "telemetry_log_interval_s": 30,
+    }
     config_dict["advanced"]["reset_browser_interval"] = 0
     config_dict["advanced"]["proxy_server_port"] = ""
     config_dict["advanced"]["window_size"] = "600,1024"
@@ -352,6 +360,14 @@ def migrate_config(config_dict):
             config_dict["advanced"]["smart_mode"].setdefault("hunting_reload_interval", 0.1)
             config_dict["advanced"]["smart_mode"].setdefault("waiting_reload_interval", 2.0)
             config_dict["advanced"]["smart_mode"].setdefault("transition_threshold", 3)
+        # Batch 3: passive network telemetry config.
+        config_dict["advanced"].setdefault("network", {})
+        if isinstance(config_dict["advanced"].get("network"), dict):
+            config_dict["advanced"]["network"].setdefault("rtt_compensation_enable", True)
+            config_dict["advanced"]["network"].setdefault("compensation_max_ms", 1000)
+            config_dict["advanced"]["network"].setdefault("dynamic_backoff_enable", True)
+            config_dict["advanced"]["network"].setdefault("backoff_max_seconds", 30.0)
+            config_dict["advanced"]["network"].setdefault("telemetry_log_interval_s", 30)
 
     # Ensure all default fields exist (fills missing keys from new versions)
     default = get_default_config()
@@ -624,6 +640,44 @@ class RunHandler(tornado.web.RequestHandler):
         print('run button pressed.')
         launch_maxbot()
         self.write({"run": True})
+
+class NetworkTelemetryHandler(tornado.web.RequestHandler):
+    """Batch 3 R-5: GET-only endpoint exposing the bot's passive network
+    observations (TTFB / clock skew / error counter). Bot writes the snapshot
+    to MAXBOT_NETWORK_TELEMETRY.json; we read and shape it for the UI.
+    """
+
+    def get(self):
+        from nodriver_common import _load_persisted_network_telemetry
+
+        data = _load_persisted_network_telemetry()
+        if not data:
+            self.write({
+                "available": False,
+                "message": "尚無 telemetry 資料(bot 未啟動或剛啟動)",
+            })
+            return
+
+        ttfb_samples = data.get("ttfb_samples_ms", []) or []
+        skew_samples = data.get("clock_skew_samples_s", []) or []
+
+        def _median(lst):
+            if not lst:
+                return None
+            s = sorted(lst)
+            return s[len(s) // 2]
+
+        self.write({
+            "available": True,
+            "samples_count": len(ttfb_samples),
+            "ttfb_median_ms": _median(ttfb_samples),
+            "ttfb_last_ms": data.get("last_ttfb_ms"),
+            "clock_skew_median_s": _median(skew_samples),
+            "consecutive_errors": data.get("consecutive_errors", 0),
+            "last_status_code": data.get("last_status_code", 0),
+            "last_response_at": data.get("last_response_at", 0),
+        })
+
 
 class SmartModeHandler(tornado.web.RequestHandler):
     """Batch 2 — Smart hunting/waiting mode state + forced override.
@@ -1234,6 +1288,7 @@ async def main_server():
         ("/run", RunHandler),
         ("/api/no-reload", NoReloadToggleHandler),
         ("/api/smart-mode", SmartModeHandler),
+        ("/api/network-telemetry", NetworkTelemetryHandler),
         
         # json api
         ("/load", LoadJsonHandler),

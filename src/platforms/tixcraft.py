@@ -50,6 +50,7 @@ from nodriver_common import (
     record_area_outcome,
     get_effective_mode,
     get_effective_reload_interval,
+    record_network_response,
 )
 
 __all__ = [
@@ -3317,6 +3318,8 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
             "form_submitted_at": 0,
             # Bug 1.6-ⓗ F5 detection
             "frame_nav_handler_registered": False,
+            # Batch 3: passive network telemetry handler
+            "network_telemetry_handler_registered": False,
         })
 
     # Register global alert handler (remains active throughout session)
@@ -3375,6 +3378,51 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
             debug.log("[F5] Frame navigation handler registered")
         except Exception as handler_exc:
             debug.log(f"[F5] Failed to register frame nav handler: {handler_exc}")
+
+    # Batch 3 (R-1): Passive network telemetry — observe every CDP
+    # Network.responseReceived event the bot already triggers, extract TTFB
+    # + server Date header. We NEVER send extra requests to the server.
+    async def handle_response_received(event):
+        try:
+            response = getattr(event, "response", None)
+            if response is None:
+                return
+            url = getattr(response, "url", "") or ""
+            if not any(d in url for d in ("tixcraft.com", "indievox.com", "ticketmaster.")):
+                return
+
+            status = getattr(response, "status", 0) or 0
+            timing = getattr(response, "timing", None)
+            headers = getattr(response, "headers", {}) or {}
+
+            ttfb_ms = None
+            if timing is not None:
+                receive_headers_end = getattr(timing, "receive_headers_end", None)
+                if receive_headers_end is not None and receive_headers_end >= 0:
+                    ttfb_ms = float(receive_headers_end)
+
+            # HTTP standard is 'Date' but some servers send 'date'
+            server_date_str = ""
+            if isinstance(headers, dict):
+                server_date_str = headers.get("Date") or headers.get("date") or ""
+
+            record_network_response(
+                url=url,
+                status=int(status),
+                ttfb_ms=ttfb_ms,
+                server_date_str=server_date_str,
+            )
+        except Exception:
+            # never let telemetry crash the bot
+            pass
+
+    if not _state.get("network_telemetry_handler_registered", False):
+        try:
+            tab.add_handler(cdp.network.ResponseReceived, handle_response_received)
+            _state["network_telemetry_handler_registered"] = True
+            debug.log("[NET] Network telemetry handler registered")
+        except Exception as handler_exc:
+            debug.log(f"[NET] Failed to register telemetry handler: {handler_exc}")
 
     await nodriver_tixcraft_home_close_window(tab)
 

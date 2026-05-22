@@ -75,6 +75,11 @@ const smart_mode_enable = document.querySelector('#smart_mode_enable');
 const smart_mode_hunting_reload_interval = document.querySelector('#smart_mode_hunting_reload_interval');
 const smart_mode_waiting_reload_interval = document.querySelector('#smart_mode_waiting_reload_interval');
 const smart_mode_transition_threshold = document.querySelector('#smart_mode_transition_threshold');
+const network_rtt_compensation_enable = document.querySelector('#network_rtt_compensation_enable');
+const network_compensation_max_ms = document.querySelector('#network_compensation_max_ms');
+const network_dynamic_backoff_enable = document.querySelector('#network_dynamic_backoff_enable');
+const network_backoff_max_seconds = document.querySelector('#network_backoff_max_seconds');
+const network_telemetry_log_interval_s = document.querySelector('#network_telemetry_log_interval_s');
 const show_timing_log = document.querySelector('#show_timing_log');
 const reset_browser_interval = document.querySelector('#reset_browser_interval');
 const server_port = document.querySelector('#server_port');
@@ -353,6 +358,28 @@ function load_settins_to_form(settings)
         if (smart_mode_transition_threshold) {
             const v = sm.transition_threshold;
             smart_mode_transition_threshold.value = (v === undefined || v === null) ? 3 : v;
+        }
+        // Batch 3: network load (nested object)
+        const net = (settings.advanced && settings.advanced.network) || {};
+        if (network_rtt_compensation_enable) {
+            const flag = net.rtt_compensation_enable;
+            network_rtt_compensation_enable.checked = (flag === undefined || flag === null) ? true : !!flag;
+        }
+        if (network_compensation_max_ms) {
+            const v = net.compensation_max_ms;
+            network_compensation_max_ms.value = (v === undefined || v === null) ? 1000 : v;
+        }
+        if (network_dynamic_backoff_enable) {
+            const flag = net.dynamic_backoff_enable;
+            network_dynamic_backoff_enable.checked = (flag === undefined || flag === null) ? true : !!flag;
+        }
+        if (network_backoff_max_seconds) {
+            const v = net.backoff_max_seconds;
+            network_backoff_max_seconds.value = (v === undefined || v === null) ? 30 : v;
+        }
+        if (network_telemetry_log_interval_s) {
+            const v = net.telemetry_log_interval_s;
+            network_telemetry_log_interval_s.value = (v === undefined || v === null) ? 30 : v;
         }
         if (show_timing_log) {
             const flag = settings.advanced.show_timing_log;
@@ -657,6 +684,28 @@ function save_changes_to_dict(silent_flag)
             if (smart_mode_transition_threshold) {
                 const raw = parseInt(smart_mode_transition_threshold.value, 10);
                 settings.advanced.smart_mode.transition_threshold = (Number.isFinite(raw) && raw >= 1 && raw <= 20) ? raw : 3;
+            }
+            // Batch 3: network save (nested object)
+            if (!settings.advanced.network || typeof settings.advanced.network !== 'object') {
+                settings.advanced.network = {};
+            }
+            if (network_rtt_compensation_enable) {
+                settings.advanced.network.rtt_compensation_enable = !!network_rtt_compensation_enable.checked;
+            }
+            if (network_compensation_max_ms) {
+                const raw = parseInt(network_compensation_max_ms.value, 10);
+                settings.advanced.network.compensation_max_ms = (Number.isFinite(raw) && raw >= 0 && raw <= 5000) ? raw : 1000;
+            }
+            if (network_dynamic_backoff_enable) {
+                settings.advanced.network.dynamic_backoff_enable = !!network_dynamic_backoff_enable.checked;
+            }
+            if (network_backoff_max_seconds) {
+                const raw = parseFloat(network_backoff_max_seconds.value);
+                settings.advanced.network.backoff_max_seconds = (Number.isFinite(raw) && raw >= 1 && raw <= 300) ? raw : 30.0;
+            }
+            if (network_telemetry_log_interval_s) {
+                const raw = parseInt(network_telemetry_log_interval_s.value, 10);
+                settings.advanced.network.telemetry_log_interval_s = (Number.isFinite(raw) && raw >= 0 && raw <= 600) ? raw : 30;
             }
             if (show_timing_log) {
                 settings.advanced.show_timing_log = !!show_timing_log.checked;
@@ -1601,6 +1650,52 @@ if (smartModeText) {
 
 
 // ============================================================
+// Batch 3: Passive network telemetry summary (runtime tab)
+// ============================================================
+const netTelemetrySummary = document.querySelector('#netTelemetrySummary');
+
+async function refreshNetworkTelemetry() {
+    if (!netTelemetrySummary) return;
+    const clearColors = () => {
+        netTelemetrySummary.classList.remove('text-success', 'text-warning', 'text-danger', 'text-muted');
+    };
+    try {
+        const resp = await fetch('/api/network-telemetry');
+        const data = await resp.json();
+        clearColors();
+        if (!data.available) {
+            netTelemetrySummary.textContent = data.message || '無資料';
+            netTelemetrySummary.classList.add('text-muted');
+            return;
+        }
+        const ttfb = (data.ttfb_median_ms !== null && data.ttfb_median_ms !== undefined)
+            ? `${Math.round(data.ttfb_median_ms)}ms` : 'N/A';
+        const skewMs = (data.clock_skew_median_s !== null && data.clock_skew_median_s !== undefined)
+            ? `${(data.clock_skew_median_s * 1000 >= 0 ? '+' : '')}${(data.clock_skew_median_s * 1000).toFixed(0)}ms` : 'N/A';
+        const errors = data.consecutive_errors || 0;
+        const errorBadge = errors > 0 ? ` ⚠️ 連續錯誤 ${errors}` : '';
+        netTelemetrySummary.textContent = `TTFB 中位數=${ttfb}, 時鐘偏差=${skewMs}, 樣本=${data.samples_count}${errorBadge}`;
+        if (errors > 0) {
+            netTelemetrySummary.classList.add('text-danger');
+        } else if (data.ttfb_median_ms !== null && data.ttfb_median_ms > 1500) {
+            netTelemetrySummary.classList.add('text-warning');
+        } else {
+            netTelemetrySummary.classList.add('text-success');
+        }
+    } catch (e) {
+        clearColors();
+        netTelemetrySummary.classList.add('text-danger');
+        netTelemetrySummary.textContent = '查詢失敗(請檢查 bot 是否在執行中)';
+    }
+}
+
+if (netTelemetrySummary) {
+    refreshNetworkTelemetry();
+    setInterval(refreshNetworkTelemetry, 3000);
+}
+
+
+// ============================================================
 // Named presets (multi-account profiles)
 // ============================================================
 // Each preset is a full copy of settings.json saved under src/presets/{name}.json.
@@ -1628,16 +1723,21 @@ function _set_save_button_warning(active) {
     const save_btn = document.querySelector('#save_btn');
     if (!save_btn) return;
     if (active) {
-        save_btn.classList.add('btn-danger');
+        // Disable + visually mark the main save button while editing a
+        // non-active preset, so the user can't accidentally overwrite the
+        // running bot's settings.json with the edited preset's values.
+        save_btn.classList.add('btn-secondary', 'disabled');
         save_btn.classList.remove('btn-primary');
         save_btn.dataset._origText = save_btn.dataset._origText || save_btn.textContent;
-        save_btn.textContent = '⚠️ 存檔（會覆蓋 settings.json，影響搶票中）';
+        save_btn.textContent = '🔒 存檔停用中（先按「✖ 結束編輯」）';
+        save_btn.disabled = true;
     } else {
-        save_btn.classList.remove('btn-danger');
+        save_btn.classList.remove('btn-secondary', 'disabled');
         save_btn.classList.add('btn-primary');
         if (save_btn.dataset._origText) {
             save_btn.textContent = save_btn.dataset._origText;
         }
+        save_btn.disabled = false;
     }
 }
 

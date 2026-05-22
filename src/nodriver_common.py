@@ -13,6 +13,8 @@ import json
 import os
 import time
 import traceback
+from collections import deque
+from email.utils import parsedate_to_datetime
 
 from zendriver import cdp
 from zendriver.core.config import Config
@@ -38,6 +40,8 @@ CONST_MAXBOT_LAST_URL_FILE = "MAXBOT_LAST_URL.txt"
 CONST_MAXBOT_QUESTION_FILE = "MAXBOT_QUESTION.txt"
 # Bug 1.6-ⓘ Layer C: manual reload-disable marker (user-controlled, global).
 CONST_MAXBOT_NO_RELOAD_FILE = "MAXBOT_NO_RELOAD.txt"
+# Batch 3: passive network telemetry snapshot for UI / cross-process visibility.
+CONST_MAXBOT_NETWORK_TELEMETRY_FILE = "MAXBOT_NETWORK_TELEMETRY.json"
 
 
 # ===== Cross-module reload timestamp (Bug 1.6-ⓗ F5 detection) =====
@@ -278,8 +282,8 @@ def set_forced_mode(mode):
     return mode
 
 
-def get_effective_reload_interval(config_dict):
-    """Return the reload interval based on current effective mode.
+def _get_mode_base_interval(config_dict):
+    """Return the mode-derived base reload interval (without R-4 backoff applied).
 
     If smart mode is disabled, returns existing auto_reload_page_interval.
     """
@@ -302,6 +306,280 @@ def get_effective_reload_interval(config_dict):
             return 2.0
     except Exception:
         return float(config_dict.get("advanced", {}).get("auto_reload_page_interval", 0) or 0)
+
+
+def get_effective_reload_interval(config_dict):
+    """Return mode-aware reload interval with Batch 3 dynamic backoff applied.
+
+    Backoff multiplier (R-4) is computed from passive network telemetry —
+    we never probe the server actively. The factor only goes UP from the
+    base interval; it never makes reloads faster.
+    """
+    base = _get_mode_base_interval(config_dict)
+    try:
+        if not config_dict.get("advanced", {}).get("network", {}).get("dynamic_backoff_enable", True):
+            return base
+
+        factor = _calculate_backoff_factor(config_dict)
+
+        max_seconds_raw = config_dict.get("advanced", {}).get("network", {}).get("backoff_max_seconds", 30.0)
+        try:
+            max_seconds = float(max_seconds_raw)
+            if max_seconds < 1 or max_seconds > 300:
+                max_seconds = 30.0
+        except (TypeError, ValueError):
+            max_seconds = 30.0
+
+        effective = base * factor
+        if effective > max_seconds:
+            effective = max_seconds
+
+        # One-shot [BACKOFF] log when factor != 1.0 (avoids log spam — only
+        # logs when factor changes or every 30s while elevated).
+        if factor > 1.0:
+            _maybe_emit_backoff_log(base, factor, effective)
+        return effective
+    except Exception:
+        return base
+
+
+# ===== Batch 3: Passive network telemetry =====
+# Observation only — every value here comes from CDP Network.responseReceived
+# events fired for requests the bot was already going to make. Never probe.
+
+_network_telemetry = {
+    "ttfb_samples": deque(maxlen=20),         # recent TTFB in ms
+    "clock_skew_samples": deque(maxlen=20),   # recent (server - local) in seconds
+    "consecutive_errors": 0,                  # 4xx/5xx in a row
+    "last_response_at": 0.0,                  # local wall-clock of last response
+    "last_status_code": 0,
+    "last_ttfb_ms": 0.0,
+}
+_last_telemetry_write_at = 0.0
+_last_backoff_log_at = 0.0
+_last_backoff_factor_logged = 1.0
+_last_telemetry_log_at = 0.0
+
+
+def _network_telemetry_file_path():
+    return os.path.join(os.path.dirname(os.path.realpath(__file__)), CONST_MAXBOT_NETWORK_TELEMETRY_FILE)
+
+
+def _persist_network_telemetry():
+    """Atomically write current telemetry snapshot to disk. Throttled to 2 Hz."""
+    global _last_telemetry_write_at
+    try:
+        now = time.time()
+        if now - _last_telemetry_write_at < 0.5:
+            return
+        _last_telemetry_write_at = now
+
+        snapshot = {
+            "ttfb_samples_ms": list(_network_telemetry["ttfb_samples"]),
+            "clock_skew_samples_s": list(_network_telemetry["clock_skew_samples"]),
+            "consecutive_errors": _network_telemetry["consecutive_errors"],
+            "last_response_at": _network_telemetry["last_response_at"],
+            "last_status_code": _network_telemetry["last_status_code"],
+            "last_ttfb_ms": _network_telemetry["last_ttfb_ms"],
+        }
+        path = _network_telemetry_file_path()
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
+def _load_persisted_network_telemetry():
+    """Read telemetry from file. Returns None if file is missing/corrupt."""
+    try:
+        path = _network_telemetry_file_path()
+        if not os.path.exists(path):
+            return None
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def record_network_response(url, status, ttfb_ms, server_date_str):
+    """Record one passive observation. Bot-side only. Never raises."""
+    try:
+        now = time.time()
+        _network_telemetry["last_response_at"] = now
+        _network_telemetry["last_status_code"] = int(status)
+
+        # TTFB sample — sanity-check range to drop spurious values.
+        if ttfb_ms is not None and 0 <= float(ttfb_ms) < 60000:
+            ttfb_val = float(ttfb_ms)
+            _network_telemetry["ttfb_samples"].append(ttfb_val)
+            _network_telemetry["last_ttfb_ms"] = ttfb_val
+
+        # Clock skew sample. HTTP Date header is second-precision only — this is
+        # NOT NTP. Only useful for detecting gross local-clock drift (≥1s).
+        if server_date_str:
+            try:
+                server_dt = parsedate_to_datetime(server_date_str)
+                if server_dt is not None:
+                    skew = server_dt.timestamp() - now  # +ve = server ahead
+                    if abs(skew) < 60:  # drop anything that looks like parse garbage
+                        _network_telemetry["clock_skew_samples"].append(skew)
+            except Exception:
+                pass
+
+        if 400 <= int(status) < 600:
+            _network_telemetry["consecutive_errors"] += 1
+        else:
+            if _network_telemetry["consecutive_errors"] > 0:
+                _network_telemetry["consecutive_errors"] = 0
+
+        _persist_network_telemetry()
+    except Exception:
+        pass
+
+
+def get_clock_skew_seconds():
+    """Return median (server - local) skew in seconds. 0.0 if no samples."""
+    try:
+        samples = list(_network_telemetry["clock_skew_samples"])
+        if not samples:
+            return 0.0
+        samples.sort()
+        return samples[len(samples) // 2]
+    except Exception:
+        return 0.0
+
+
+def get_refresh_compensation_seconds(config_dict):
+    """How many seconds to subtract from refresh_datetime target.
+
+    compensation = TTFB_median/2 + clock_skew + bot_internal_latency, capped.
+    Returns 0.0 if disabled or not enough samples.
+    """
+    try:
+        if not config_dict.get("advanced", {}).get("network", {}).get("rtt_compensation_enable", True):
+            return 0.0
+
+        samples = list(_network_telemetry["ttfb_samples"])
+        if len(samples) < 3:
+            return 0.0  # not enough data yet
+
+        sorted_samples = sorted(samples)
+        median_ttfb_ms = sorted_samples[len(sorted_samples) // 2]
+
+        rtt_half_s = median_ttfb_ms / 2.0 / 1000.0
+        clock_skew_s = get_clock_skew_seconds()
+        bot_latency_s = 0.05  # measured: busy-wait → CDP → Chrome reload ~50ms
+
+        comp = rtt_half_s + clock_skew_s + bot_latency_s
+
+        max_ms_raw = config_dict.get("advanced", {}).get("network", {}).get("compensation_max_ms", 1000)
+        try:
+            max_s = float(max_ms_raw) / 1000.0
+            if max_s < 0 or max_s > 5:
+                max_s = 1.0
+        except (TypeError, ValueError):
+            max_s = 1.0
+
+        if comp < 0:
+            comp = 0.0
+        if comp > max_s:
+            comp = max_s
+        return comp
+    except Exception:
+        return 0.0
+
+
+def _calculate_backoff_factor(config_dict):
+    """Pick the larger of (error_factor, ttfb_factor). Never < 1.0."""
+    try:
+        errors = _network_telemetry.get("consecutive_errors", 0)
+        if errors >= 5:
+            error_factor = 5.0
+        elif errors >= 3:
+            error_factor = 3.0
+        elif errors >= 1:
+            error_factor = 1.5
+        else:
+            error_factor = 1.0
+
+        samples = list(_network_telemetry["ttfb_samples"])
+        ttfb_factor = 1.0
+        if len(samples) >= 5:
+            recent = sorted(samples[-5:])
+            recent_median = recent[len(recent) // 2]
+            if recent_median > 3000:
+                ttfb_factor = 2.0
+            elif recent_median > 1500:
+                ttfb_factor = 1.5
+
+        return max(error_factor, ttfb_factor)
+    except Exception:
+        return 1.0
+
+
+def _maybe_emit_backoff_log(base, factor, effective):
+    """One-shot [BACKOFF] log when factor changes or every 30s while elevated."""
+    global _last_backoff_log_at, _last_backoff_factor_logged
+    try:
+        now = time.time()
+        # Always print when factor changes; otherwise re-print every 30s.
+        if abs(factor - _last_backoff_factor_logged) < 0.01 and (now - _last_backoff_log_at) < 30:
+            return
+        _last_backoff_log_at = now
+        _last_backoff_factor_logged = factor
+
+        errors = _network_telemetry.get("consecutive_errors", 0)
+        samples = list(_network_telemetry["ttfb_samples"])
+        ttfb_median = None
+        if len(samples) >= 5:
+            recent = sorted(samples[-5:])
+            ttfb_median = recent[len(recent) // 2]
+
+        if errors >= 1:
+            reason = f"errors={errors}"
+        elif ttfb_median is not None and ttfb_median > 1500:
+            reason = f"ttfb_median={ttfb_median:.0f}ms"
+        else:
+            reason = "n/a"
+
+        print(f"[BACKOFF] Reload interval extended: base={base:.2f}s × factor={factor:.1f} = {effective:.2f}s (reason: {reason})")
+    except Exception:
+        pass
+
+
+def maybe_emit_telemetry_log(config_dict):
+    """Periodic [NET] one-liner. Called from main loop; throttled by config."""
+    global _last_telemetry_log_at
+    try:
+        interval_raw = config_dict.get("advanced", {}).get("network", {}).get("telemetry_log_interval_s", 30)
+        try:
+            interval = int(interval_raw)
+        except (TypeError, ValueError):
+            interval = 30
+        if interval <= 0:
+            return
+
+        now = time.time()
+        if now - _last_telemetry_log_at < interval:
+            return
+        _last_telemetry_log_at = now
+
+        samples = list(_network_telemetry["ttfb_samples"])
+        if not samples:
+            return  # nothing to report yet
+
+        sorted_samples = sorted(samples)
+        median = sorted_samples[len(sorted_samples) // 2]
+        p95 = sorted_samples[int(len(sorted_samples) * 0.95)] if len(sorted_samples) >= 5 else sorted_samples[-1]
+        skew_ms = get_clock_skew_seconds() * 1000
+        errors = _network_telemetry.get("consecutive_errors", 0)
+        factor = _calculate_backoff_factor(config_dict)
+
+        print(f"[NET] TTFB median={median:.0f}ms p95={p95:.0f}ms, clock skew={skew_ms:+.0f}ms, consecutive errors={errors}, backoff factor={factor:.1f}")
+    except Exception:
+        pass
 
 CONST_FROM_TOP_TO_BOTTOM = "from top to bottom"
 CONST_FROM_BOTTOM_TO_TOP = "from bottom to top"

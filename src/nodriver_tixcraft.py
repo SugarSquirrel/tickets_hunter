@@ -16,7 +16,7 @@ import threading
 import time
 import warnings
 import webbrowser
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # 強制使用 UTF-8 編碼輸出（解決 Windows CP950 編碼問題）
 # 適用於所有輸出環境（終端、IDE、重定向、管道）
@@ -485,15 +485,21 @@ def parse_refresh_datetime(target_str):
         return None
 
 
-def _format_reload_fired_log(target_dt):
-    # Bug 1.6-ⓖ: wall-clock log for refresh_datetime trigger calibration.
-    # Not nav-relative so it bypasses log_timing / _timing_state.
+def _format_reload_fired_log(target_dt, effective_target_dt=None, compensation_s=0.0):
+    # Bug 1.6-ⓖ / Batch 3 R-3: wall-clock log for refresh_datetime calibration.
+    # Reports user-requested target vs RTT-compensated effective target vs
+    # actual fire time, so the user can see exactly how much we shifted.
     actual_dt = datetime.now()
-    delta_ms = int((actual_dt - target_dt).total_seconds() * 1000)
+    base = target_dt if effective_target_dt is None else effective_target_dt
+    delta_ms = int((actual_dt - base).total_seconds() * 1000)
     sign = '+' if delta_ms >= 0 else ''
     target_str = target_dt.strftime('%H:%M:%S.%f')[:-3]
     actual_str = actual_dt.strftime('%H:%M:%S.%f')[:-3]
-    return f"[T] T_reload_fired: target={target_str} actual={actual_str} delta={sign}{delta_ms}ms"
+    if effective_target_dt is not None and compensation_s > 0:
+        eff_str = effective_target_dt.strftime('%H:%M:%S.%f')[:-3]
+        comp_ms = int(compensation_s * 1000)
+        return f"[T] T_reload_fired: target={target_str} effective={eff_str} actual={actual_str} delta={sign}{delta_ms}ms (compensation={comp_ms}ms)"
+    return f"[T] T_reload_fired: target={target_str} actual={actual_str} delta={sign}{delta_ms}ms (compensation=0ms)"
 
 
 async def check_refresh_datetime_gate(tab, config_dict, state):
@@ -518,14 +524,19 @@ async def check_refresh_datetime_gate(tab, config_dict, state):
         state["reached"] = True
         return False
 
+    # Batch 3 (R-3): RTT compensation — fire slightly earlier so the GET
+    # arrives at the server right at the user-requested target time.
+    compensation_s = get_refresh_compensation_seconds(config_dict)
+    effective_target_dt = target_dt - timedelta(seconds=compensation_s) if compensation_s > 0 else target_dt
+
     now = datetime.now()
 
     # Already past target time (covers "bot starts after target" case)
-    if now >= target_dt:
+    if now >= effective_target_dt:
         state["reached"] = True
         try:
             if config_dict.get("advanced", {}).get("show_timing_log", True):
-                print(_format_reload_fired_log(target_dt))
+                print(_format_reload_fired_log(target_dt, effective_target_dt, compensation_s))
             mark_bot_reload()
             await tab.reload()
             print("[REFRESH] Target time reached, starting:", target_dt.strftime('%Y/%m/%d %H:%M:%S'))
@@ -534,7 +545,7 @@ async def check_refresh_datetime_gate(tab, config_dict, state):
         return False
 
     # Before target time: gate is active
-    remaining = (target_dt - now).total_seconds()
+    remaining = (effective_target_dt - now).total_seconds()
 
     # Countdown display
     now_mono = time.time()
@@ -567,7 +578,7 @@ async def check_refresh_datetime_gate(tab, config_dict, state):
         state["reached"] = True
         try:
             if config_dict.get("advanced", {}).get("show_timing_log", True):
-                print(_format_reload_fired_log(target_dt))
+                print(_format_reload_fired_log(target_dt, effective_target_dt, compensation_s))
             mark_bot_reload()
             await tab.reload()
             print("[REFRESH] Target time reached (precision), starting:", target_dt.strftime('%Y/%m/%d %H:%M:%S'))
@@ -630,6 +641,17 @@ async def reload_config(config_dict, last_mtime):
                         for field in sm_fields:
                             if field in new_config["advanced"]["smart_mode"]:
                                 config_dict["advanced"]["smart_mode"][field] = new_config["advanced"]["smart_mode"][field]
+
+                    # Batch 3: network section (also nested, same merge pattern).
+                    if "network" in new_config["advanced"] and isinstance(new_config["advanced"]["network"], dict):
+                        if "network" not in config_dict["advanced"] or not isinstance(config_dict["advanced"].get("network"), dict):
+                            config_dict["advanced"]["network"] = {}
+                        net_fields = ["rtt_compensation_enable", "compensation_max_ms",
+                                      "dynamic_backoff_enable", "backoff_max_seconds",
+                                      "telemetry_log_interval_s"]
+                        for field in net_fields:
+                            if field in new_config["advanced"]["network"]:
+                                config_dict["advanced"]["network"][field] = new_config["advanced"]["network"][field]
 
                 print("Configuration reloaded from settings.json")
                 return config_dict, current_mtime
@@ -739,6 +761,9 @@ async def main(args):
         await asyncio.sleep(0.05)
 
         config_dict, config_mtime = await reload_config(config_dict, config_mtime)
+
+        # Batch 3 (R-6): periodic [NET] telemetry summary (throttled by setting)
+        maybe_emit_telemetry_log(config_dict)
 
         # pass if driver not loaded.
         if driver is None:

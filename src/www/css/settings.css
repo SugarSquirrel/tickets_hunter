@@ -271,3 +271,18 @@ textarea {
     color-scheme: dark;
 }
 
+/* --- Advanced tab section header (Batch 3 reorg) ---
+   Light visual divider between logical groups of settings. */
+.settings-section-header {
+    margin-top: 2rem;
+    margin-bottom: 1rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 2px solid var(--bs-border-color, #495057);
+    color: var(--bs-emphasis-color, #f8f9fa);
+    font-weight: 600;
+    font-size: 1.1rem;
+}
+.settings-section-header:first-child {
+    margin-top: 0;
+}
+

@@ -617,6 +617,7 @@
       <!-- tab 3 -->
       <div class="tab-pane fade" id="advanced-tab-pane" role="tabpanel" aria-labelledby="advanced-tab" tabindex="1">
 
+        <h5 class="settings-section-header">🔔 通知與聲音</h5>
 
         <div class="row mb-3">
           <label class="col-sm-2 col-form-label">有票時播放音效<span class="help-icon" data-help="play_ticket_sound" title="有票時播放音效說明" tabindex="0" role="button" aria-label="有票時播放音效 說明"></span></label>
@@ -717,6 +718,8 @@
           </div>
         </div>
 
+        <h5 class="settings-section-header">⚡ 執行速度與行為</h5>
+
         <div class="row mb-3">
           <label for="action_speed_multiplier" class="col-sm-2 col-form-label">動作速度倍率</label>
           <div class="col-sm-10 col-lg-8 col-xl-6">
@@ -769,7 +772,7 @@
                   智慧模式會在「找得到區」時用高頻刷新搶票，在「連續找不到區」時自動切換到較慢的刷新，
                   避免帳號被誤判。<strong class="text-primary">強烈建議保持開啟。</strong>
                 </p>
-                <details class="small mb-0">
+                <details class="small mb-3">
                   <summary style="cursor:pointer;">📖 詳細說明（點擊展開）</summary>
                   <div class="mt-2">
                     <ul class="mb-2 ps-3">
@@ -777,53 +780,155 @@
                       <li><strong>等待模式</strong>：依「等待 reload 間隔」設定放慢刷新（保護帳號）；此時套用「秒數暫停/繼續關鍵字」</li>
                       <li><strong>切換時機</strong>：連續 N 次找不到符合 area_keyword 的可選區 → 轉等待；找到並點到 → 立即轉狩獵</li>
                     </ul>
-                    <p class="mb-0"><strong>關閉這個功能會發生什麼？</strong>bot 永遠以「自動刷新頁面間隔」刷新，秒數暫停關鍵字一律生效（行為與舊版相同）。如果你已透過「秒數暫停」自己控制刷新節奏，可關閉。</p>
+                    <p class="mb-0"><strong>關閉這個功能會發生什麼？</strong>bot 退回早期版本行為：永遠用「自動刷新頁面間隔」刷新，秒數暫停關鍵字一律生效。如果你已透過「秒數暫停」自己控制刷新節奏，可關閉。</p>
                   </div>
                 </details>
+
+                <hr class="my-3" />
+
+                <div class="row mb-3">
+                  <label class="col-sm-3 col-form-label">智慧模式啟用</label>
+                  <div class="col-sm-9">
+                    <div class="form-check form-switch">
+                      <input class="form-check-input highlight-field" type="checkbox" id="smart_mode_enable" checked>
+                      <label class="form-check-label fw-bold" for="smart_mode_enable">啟用自動狩獵/等待切換（建議開啟以保護帳號）</label>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="row mb-3">
+                  <label for="smart_mode_hunting_reload_interval" class="col-sm-3 col-form-label">狩獵 reload 間隔(秒)</label>
+                  <div class="col-sm-9">
+                    <input class="form-control highlight-field" id="smart_mode_hunting_reload_interval" type="number" step="0.1" min="0.05" max="60" value="0.1" />
+                    <small class="form-text text-muted d-block mt-1">
+                      狩獵模式（搶票中）找不到符合條件的區時，間隔多久再刷新一次。預設 <strong>0.1</strong>；過快可能被偵測為異常流量。範圍 0.05~60。
+                    </small>
+                  </div>
+                </div>
+
+                <div class="row mb-3">
+                  <label for="smart_mode_waiting_reload_interval" class="col-sm-3 col-form-label">等待 reload 間隔(秒)</label>
+                  <div class="col-sm-9">
+                    <input class="form-control highlight-field" id="smart_mode_waiting_reload_interval" type="number" step="0.5" min="0.5" max="60" value="2.0" />
+                    <small class="form-text text-muted d-block mt-1">
+                      等待模式（持續找不到區，已切到守備節奏）下的刷新間隔。預設 <strong>2.0</strong>；不要設太短以免重新被誤判。範圍 0.5~60。
+                    </small>
+                  </div>
+                </div>
+
+                <div class="row mb-0">
+                  <label for="smart_mode_transition_threshold" class="col-sm-3 col-form-label">轉換門檻(次)</label>
+                  <div class="col-sm-9">
+                    <input class="form-control highlight-field" id="smart_mode_transition_threshold" type="number" step="1" min="1" max="20" value="3" />
+                    <small class="form-text text-muted d-block mt-1">
+                      連續幾次找不到符合條件的區，才從狩獵轉等待。預設 <strong>3</strong>（接近門檻時 console 會印 <code>[SMART] Hunting: 2/3</code> 提示）。範圍 1~20。
+                    </small>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
         </div>
 
         <div class="row mb-3">
-          <label class="col-sm-2 col-form-label">智慧模式啟用</label>
-          <div class="col-sm-10 col-lg-8 col-xl-6">
-            <div class="form-check form-switch">
-              <input class="form-check-input highlight-field" type="checkbox" id="smart_mode_enable" checked>
-              <label class="form-check-label fw-bold" for="smart_mode_enable">啟用自動狩獵/等待切換（建議開啟以保護帳號）</label>
+          <div class="col-12">
+            <div class="card border-info">
+              <div class="card-header bg-info text-white py-2">
+                <span class="badge bg-warning text-dark me-2">✨ 特殊功能</span>
+                <strong>網路自適應 — RTT 補償 + 動態退避</strong>
+              </div>
+              <div class="card-body">
+                <p class="mb-2 small">
+                  <strong>這個功能在做什麼？</strong>bot 在背景觀察自己發出的每個 request 的延遲(TTFB)與 server 時鐘，
+                  自動把 refresh_datetime 觸發時間往前挪一個 RTT 的一半，讓 GET 抵達 server 時剛好是目標時間；
+                  並在 server 變慢或連續錯誤時自動拉長 reload 間隔保護帳號。
+                  <strong class="text-info">完全 passive 觀察，不對 server 多發任何 request</strong>。
+                </p>
+                <div class="alert alert-success small mb-3 mt-2">
+                  <strong>💡 怎麼用？</strong>
+                  <ol class="mb-1 ps-3">
+                    <li><strong>提前 30 秒以上</strong>打開活動頁，讓 bot 累積網路樣本(不用按刷新，光是打開頁面瀏覽器就會自動載 15~20 個資源 = 15~20 個樣本)</li>
+                    <li>refresh_datetime 直接填官方開賣時間，例如 <code>2026/05/22 12:00:00</code>，<u>不用</u>再手動寫 <code>11:59:59.7</code> — bot 會自己算補償</li>
+                    <li>開賣前看「執行階段 → 網路狀態」確認「樣本」≥ 3，補償才會生效</li>
+                  </ol>
+                  <p class="mb-0 small">
+                    <strong>常見疑問：</strong>
+                    <em>「bot 會不會為了刷數據而被當異常？」</em> 不會 — 樣本來自瀏覽器自然載入頁面的副產品，bot 沒有為了量測多刷任何一次。
+                    <em>「20 秒才打開來得及嗎？」</em> 來得及 — 活動頁本身的初始載入就有 15+ 個樣本，1~2 秒內累積完。
+                    <em>「樣本不夠會怎樣？」</em> 補償自動跳過(回到不補償行為)，refresh_datetime 完全照你寫的時間 fire。
+                  </p>
+                </div>
+                <details class="small mb-3">
+                  <summary style="cursor:pointer;">📖 詳細說明(點擊展開)</summary>
+                  <div class="mt-2">
+                    <ul class="mb-2 ps-3">
+                      <li><strong>RTT 補償</strong>：設 <code>12:00:00.000</code>，bot 會在約 <code>11:59:59.870</code> 觸發 reload(假設 TTFB=200ms + 5ms 本地誤差 + 50ms 內部延遲 ≈ 155ms 補償)，讓 GET 抵達 server 時是 12:00:00。</li>
+                      <li><strong>動態退避</strong>：連續 1 次 4xx/5xx → reload 間隔 ×1.5；連續 3 次 → ×3.0；連續 5 次 → ×5.0(上限)。TTFB 中位數 &gt;1500ms → ×1.5；&gt;3000ms → ×2.0。取兩者較大值，不疊乘。</li>
+                      <li><strong>觀察樣本來源</strong>：CDP <code>Network.responseReceived</code> 事件，是瀏覽器本來就會 fire 的事件，不會發任何額外請求。</li>
+                      <li><strong>樣本機制</strong>：保留最近 <strong>20 筆</strong> TTFB(FIFO)，至少要 <strong>3 筆</strong>才啟動補償。樣本數可在「執行階段 → 網路狀態」即時觀察。</li>
+                      <li><strong>開賣瞬間 server 塞爆 OK 嗎？</strong>OK。中位數用的是開賣前的 pre-peak 樣本(代表「我家 → 拓元邊緣」的網路單程時間)，不受 server 內部排隊影響。Server 處理時間發生在你的 GET 抵達之後，跟你「該何時 fire」無關。</li>
+                    </ul>
+                    <p class="mb-0"><strong>關閉會發生什麼？</strong>RTT 補償關 = refresh_datetime 完全照你寫的時間觸發(可能慢 server 一個 RTT)；動態退避關 = reload 間隔永遠用智慧模式的 base 值，server 變慢時可能加速 ban 你。</p>
+                  </div>
+                </details>
+
+                <hr class="my-3" />
+
+                <div class="row mb-3">
+                  <label class="col-sm-3 col-form-label">refresh_datetime 自動補償</label>
+                  <div class="col-sm-9">
+                    <div class="form-check form-switch">
+                      <input class="form-check-input highlight-field" type="checkbox" id="network_rtt_compensation_enable" checked>
+                      <label class="form-check-label fw-bold" for="network_rtt_compensation_enable">啟用(用 TTFB 中位數自動往前挪觸發時間)</label>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="row mb-3">
+                  <label for="network_compensation_max_ms" class="col-sm-3 col-form-label">補償上限(毫秒)</label>
+                  <div class="col-sm-9">
+                    <input class="form-control highlight-field" id="network_compensation_max_ms" type="number" step="50" min="0" max="5000" value="1000" />
+                    <small class="form-text text-muted d-block mt-1">
+                      補償秒數的安全上限，避免極端 TTFB 把目標時間推太前。預設 <strong>1000</strong>ms。範圍 0~5000。
+                    </small>
+                  </div>
+                </div>
+
+                <div class="row mb-3">
+                  <label class="col-sm-3 col-form-label">動態 reload 退避</label>
+                  <div class="col-sm-9">
+                    <div class="form-check form-switch">
+                      <input class="form-check-input highlight-field" type="checkbox" id="network_dynamic_backoff_enable" checked>
+                      <label class="form-check-label fw-bold" for="network_dynamic_backoff_enable">啟用(server 變慢或回 4xx/5xx 時自動延長 reload 間隔)</label>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="row mb-3">
+                  <label for="network_backoff_max_seconds" class="col-sm-3 col-form-label">退避上限(秒)</label>
+                  <div class="col-sm-9">
+                    <input class="form-control highlight-field" id="network_backoff_max_seconds" type="number" step="1" min="1" max="300" value="30" />
+                    <small class="form-text text-muted d-block mt-1">
+                      退避後 reload 間隔的最大值。預設 <strong>30</strong> 秒。範圍 1~300。
+                    </small>
+                  </div>
+                </div>
+
+                <div class="row mb-0">
+                  <label for="network_telemetry_log_interval_s" class="col-sm-3 col-form-label">[NET] log 間隔(秒)</label>
+                  <div class="col-sm-9">
+                    <input class="form-control highlight-field" id="network_telemetry_log_interval_s" type="number" step="5" min="0" max="600" value="30" />
+                    <small class="form-text text-muted d-block mt-1">
+                      console 每隔多少秒印一次網路狀況摘要。預設 <strong>30</strong>；設 <strong>0</strong> 關閉。範圍 0~600。
+                    </small>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
 
-        <div class="row mb-3">
-          <label for="smart_mode_hunting_reload_interval" class="col-sm-2 col-form-label">狩獵 reload 間隔(秒)</label>
-          <div class="col-sm-10 col-lg-8 col-xl-6">
-            <input class="form-control highlight-field" id="smart_mode_hunting_reload_interval" type="number" step="0.1" min="0.05" max="60" value="0.1" />
-            <small class="form-text text-muted d-block mt-1">
-              狩獵模式（搶票中）找不到符合條件的區時，間隔多久再刷新一次。預設 <strong>0.1</strong>；過快可能被偵測為異常流量。範圍 0.05~60。
-            </small>
-          </div>
-        </div>
-
-        <div class="row mb-3">
-          <label for="smart_mode_waiting_reload_interval" class="col-sm-2 col-form-label">等待 reload 間隔(秒)</label>
-          <div class="col-sm-10 col-lg-8 col-xl-6">
-            <input class="form-control highlight-field" id="smart_mode_waiting_reload_interval" type="number" step="0.5" min="0.5" max="60" value="2.0" />
-            <small class="form-text text-muted d-block mt-1">
-              等待模式（持續找不到區，已切到守備節奏）下的刷新間隔。預設 <strong>2.0</strong>；不要設太短以免重新被誤判。範圍 0.5~60。
-            </small>
-          </div>
-        </div>
-
-        <div class="row mb-3">
-          <label for="smart_mode_transition_threshold" class="col-sm-2 col-form-label">轉換門檻(次)</label>
-          <div class="col-sm-10 col-lg-8 col-xl-6">
-            <input class="form-control highlight-field" id="smart_mode_transition_threshold" type="number" step="1" min="1" max="20" value="3" />
-            <small class="form-text text-muted d-block mt-1">
-              連續幾次找不到符合條件的區，才從狩獵轉等待。預設 <strong>3</strong>（接近門檻時 console 會印 <code>[SMART] Hunting: 2/3</code> 提示）。範圍 1~20。
-            </small>
-          </div>
-        </div>
+        <h5 class="settings-section-header">🛠️ 除錯與日誌</h5>
 
         <div class="row mb-3">
           <label class="col-sm-2 col-form-label">顯示時間度量 log</label>
@@ -837,6 +942,26 @@
             </small>
           </div>
         </div>
+        <div class="row mb-3">
+          <label class="col-sm-2 col-form-label">輸出除錯訊息<span class="help-icon" data-help="verbose" title="輸出除錯訊息說明" tabindex="0" role="button" aria-label="輸出除錯訊息 說明"></span></label>
+          <div class="col-sm-10 col-lg-8 col-xl-6">
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" id="verbose">
+              <label class="form-check-label" for="verbose">啟用</label>
+            </div>
+          </div>
+        </div>
+        <div class="row mb-3">
+          <label class="col-sm-2 col-form-label">顯示時間戳記<span class="help-icon" data-help="show_timestamp" title="顯示時間戳記說明" tabindex="0" role="button" aria-label="顯示時間戳記 說明"></span></label>
+          <div class="col-sm-10 col-lg-8 col-xl-6">
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" id="show_timestamp">
+              <label class="form-check-label" for="show_timestamp">啟用</label>
+            </div>
+          </div>
+        </div>
+
+        <h5 class="settings-section-header">🌐 系統與瀏覽器</h5>
 
         <div class="row mb-3">
           <label for="reset_browser_interval" class="col-sm-2 col-form-label">重新啟動瀏覽器間隔(秒)<span class="help-icon" data-help="reset_browser_interval" title="重新啟動瀏覽器間隔說明" tabindex="0" role="button" aria-label="重新啟動瀏覽器間隔 說明"></span></label>
@@ -863,6 +988,17 @@
             <input class="form-control" id="window_size" value="" />
           </div>
         </div>
+        <div class="row mb-3">
+          <label class="col-sm-2 col-form-label">無圖形界面模式<span class="help-icon" data-help="headless" title="無圖形界面模式說明" tabindex="0" role="button" aria-label="無圖形界面模式 說明"></span></label>
+          <div class="col-sm-10 col-lg-8 col-xl-6">
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" id="headless">
+              <label class="form-check-label" for="headless">啟用</label>
+            </div>
+          </div>
+        </div>
+
+        <h5 class="settings-section-header">🎫 搶票行為細節</h5>
 
         <div class="row mb-3" data-under="tixcraft kham ticket udn">
           <label class="col-sm-2 col-form-label">允許不連續座位<span class="help-icon" data-help="disable_adjacent_seat" title="停用相鄰座位說明" tabindex="0" role="button" aria-label="停用相鄰座位 說明"></span></label>
@@ -891,33 +1027,9 @@
             </div>
           </div>
         </div>
-        <div class="row mb-3">
-          <label class="col-sm-2 col-form-label">無圖形界面模式<span class="help-icon" data-help="headless" title="無圖形界面模式說明" tabindex="0" role="button" aria-label="無圖形界面模式 說明"></span></label>
-          <div class="col-sm-10 col-lg-8 col-xl-6">
-            <div class="form-check form-switch">
-              <input class="form-check-input" type="checkbox" id="headless">
-              <label class="form-check-label" for="headless">啟用</label>
-            </div>
-          </div>
-        </div>
-        <div class="row mb-3">
-          <label class="col-sm-2 col-form-label">輸出除錯訊息<span class="help-icon" data-help="verbose" title="輸出除錯訊息說明" tabindex="0" role="button" aria-label="輸出除錯訊息 說明"></span></label>
-          <div class="col-sm-10 col-lg-8 col-xl-6">
-            <div class="form-check form-switch">
-              <input class="form-check-input" type="checkbox" id="verbose">
-              <label class="form-check-label" for="verbose">啟用</label>
-            </div>
-          </div>
-        </div>
-        <div class="row mb-3">
-          <label class="col-sm-2 col-form-label">顯示時間戳記<span class="help-icon" data-help="show_timestamp" title="顯示時間戳記說明" tabindex="0" role="button" aria-label="顯示時間戳記 說明"></span></label>
-          <div class="col-sm-10 col-lg-8 col-xl-6">
-            <div class="form-check form-switch">
-              <input class="form-check-input" type="checkbox" id="show_timestamp">
-              <label class="form-check-label" for="show_timestamp">啟用</label>
-            </div>
-          </div>
-        </div>
+
+        <h5 class="settings-section-header">🤖 OCR 驗證碼</h5>
+
         <div class="row mb-3" data-under="tixcraft ibon kham ticket udn famiticket funone ticketplus">
           <label class="col-sm-2 col-form-label">OCR<span class="help-icon" data-help="ocr_captcha_enable" title="OCR 驗證碼辨識說明" tabindex="0" role="button" aria-label="OCR 說明"></span></label>
           <div class="col-sm-10 col-lg-8 col-xl-6">
@@ -1352,6 +1464,10 @@
           <label for="auto_reload_page_interval" class="col-sm-2 col-form-label">自動刷新頁面間隔(秒)<span class="help-icon" data-help="auto_reload_page_interval" title="自動刷新頁面間隔說明" tabindex="0" role="button" aria-label="自動刷新頁面間隔 說明"></span></label>
           <div class="col-sm-10 col-lg-8 col-xl-6">
             <input class="form-control highlight-field" id="auto_reload_page_interval" value="" />
+            <small class="form-text text-muted d-block mt-1">
+              <strong>適用範圍：</strong>KKTIX / iBon / 寬宏 / HKTicketing / FunOne 等<u>非拓元</u>平台的主要刷新間隔。
+              拓元(tixcraft / indievox)場域的 area / date 刷新已由<strong class="text-primary">智慧模式</strong>自動接管(依狩獵/等待模式套用不同間隔)，這個欄位對拓元主流程無效；僅在拓元的少數異常路徑(找不到票數 reload、首頁重導)還會生效。
+            </small>
             <div class="alert alert-warning alert-dismissible fade mt-2" id="tixcraft-refresh-warning" role="alert" style="display: none;">
               <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-exclamation-triangle-fill me-2" viewBox="0 0 16 16">
                 <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
@@ -1486,6 +1602,32 @@
         </div>
 
         <div class="row mb-3">
+          <label class="col-sm-2 col-form-label">網路狀態</label>
+          <div class="col-sm-10 col-lg-8 col-xl-6">
+            <div class="card border-info">
+              <div class="card-header bg-info text-white py-2">
+                <strong>📡 即時網路觀察</strong>
+              </div>
+              <div class="card-body">
+                <div class="fs-6"><strong><span id="netTelemetrySummary">查詢中…</span></strong></div>
+                <details class="mt-2 small mb-0">
+                  <summary style="cursor:pointer;">📖 這些數字代表什麼？</summary>
+                  <div class="mt-2">
+                    <ul class="mb-2 ps-3">
+                      <li><strong>TTFB 中位數</strong>：從 bot 送出 request 到 server 回第一個 byte 的時間。一般 100~300ms 是健康；&gt;500ms 表示 server 變慢；&gt;1500ms 會觸發動態退避。</li>
+                      <li><strong>時鐘偏差</strong>：你電腦時鐘 vs server 時鐘的差距。HTTP Date header 只有秒精度，所以這個值有 ±500ms 誤差。如果偏差超過 ±1 秒可考慮校正系統時間。</li>
+                      <li><strong>樣本</strong>：最近 20 筆 TTFB 觀察。bot 跑越久樣本越多越穩定。</li>
+                      <li><strong>⚠️ 連續錯誤</strong>：連續幾次 4xx/5xx 回應，會觸發退避保護帳號。</li>
+                    </ul>
+                    <p class="mb-0"><strong>重要：</strong>這些數字全部來自 bot <u>本來就會發</u>的 request(瀏覽器自動載入頁面、JS、圖片等)的副產品觀察，<strong>不會對 server 多發任何 request</strong>。refresh_datetime 會用 TTFB 中位數的一半自動把觸發時間往前挪(可在進階設定關閉)。</p>
+                  </div>
+                </details>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="row mb-3">
           <label class="col-sm-2 col-form-label">搶票尖峰救援</label>
           <div class="col-sm-10 col-lg-8 col-xl-6">
             <div class="alert alert-warning mt-0" role="alert">
@@ -1569,7 +1711,7 @@
       <div class="alert alert-warning d-flex align-items-center flex-wrap gap-2 mt-2 mb-0" id="preset_edit_banner" role="alert" style="display:none;">
         <div class="flex-grow-1">
           <strong>🔧 編輯中：</strong><span id="preset_edit_name" class="fw-bold"></span>
-          <small class="d-block text-muted">表單顯示的是這個 preset 的內容，<strong>settings.json 沒有被改</strong>。在此模式下儲存請用下面的按鈕，搶票中的 bot 不會受影響。</small>
+          <small class="d-block text-muted">表單顯示的是這個 preset 的內容，<strong>settings.json 沒有被改</strong>。底下的「存檔」按鈕已自動停用以避免誤覆蓋；要存到 preset 請用本列的「💾 存到 preset」按鈕。完成後請按「✖ 結束編輯」恢復原狀態。</small>
         </div>
         <button class="btn btn-sm btn-success" id="btn_save_to_preset" type="button">💾 存到 preset</button>
         <button class="btn btn-sm btn-secondary" id="btn_exit_edit_preset" type="button">✖ 結束編輯</button>
