@@ -1,0 +1,128 @@
+{
+    "homepage": "https://tixcraft.com/activity/detail/26_btskns",
+    "browser": "chrome",
+    "language": "English",
+    "ticket_number": 2,
+    "refresh_datetime": "2026/06/02 12:00:00.850",
+    "ocr_captcha": {
+        "enable": true,
+        "beta": true,
+        "force_submit": true,
+        "image_source": "canvas",
+        "use_universal": true,
+        "path": "assets/model/universal"
+    },
+    "webdriver_type": "nodriver",
+    "date_auto_select": {
+        "enable": true,
+        "date_keyword": "",
+        "mode": "from top to bottom"
+    },
+    "area_auto_select": {
+        "enable": true,
+        "mode": "price range max remaining",
+        "area_keyword": "",
+        "price_filter": "",
+        "smart_sort_priority": "remaining rank",
+        "smart_sort_rank_direction": "high",
+        "smart_sort_rank_n": 1
+    },
+    "keyword_exclude": "\"輪椅\",\"身障\",\"身心\",\"障礙\",\"Restricted View\",\"燈柱遮蔽\",\"視線不完整\"",
+    "kktix": {
+        "auto_press_next_step_button": true,
+        "auto_fill_ticket_number": true,
+        "max_dwell_time": 90
+    },
+    "cityline": {},
+    "tixcraft": {
+        "pass_date_is_sold_out": true,
+        "auto_reload_coming_soon_page": true
+    },
+    "contact": {
+        "real_name": "",
+        "phone": "",
+        "credit_card_prefix": ""
+    },
+    "accounts": {
+        "tixcraft_sid": "",
+        "ibonqware": "",
+        "funone_session_cookie": "",
+        "fansigo_cookie": "",
+        "fansigo_account": "",
+        "fansigo_password": "",
+        "facebook_account": "",
+        "kktix_account": "",
+        "fami_account": "",
+        "cityline_account": "",
+        "urbtix_account": "",
+        "hkticketing_account": "",
+        "kham_account": "",
+        "ticket_account": "",
+        "udn_account": "",
+        "ticketplus_account": "",
+        "facebook_password": "",
+        "kktix_password": "",
+        "fami_password": "",
+        "urbtix_password": "",
+        "cityline_password": "",
+        "hkticketing_password": "",
+        "kham_password": "",
+        "ticket_password": "",
+        "udn_password": "",
+        "ticketplus_password": ""
+    },
+    "advanced": {
+        "play_sound": {
+            "ticket": true,
+            "order": true,
+            "filename": "assets/sounds/ding-dong.wav"
+        },
+        "disable_adjacent_seat": true,
+        "hide_some_image": true,
+        "block_facebook_network": false,
+        "headless": false,
+        "verbose": false,
+        "show_timestamp": true,
+        "auto_guess_options": true,
+        "user_guess_string": "",
+        "discount_code": "",
+        "server_port": 16888,
+        "remote_url": "\"http://127.0.0.1:16888/\"",
+        "auto_reload_page_interval": 2,
+        "auto_reload_overheat_count": 4,
+        "auto_reload_overheat_cd": 1,
+        "reset_browser_interval": 0,
+        "proxy_server_port": "",
+        "window_size": "",
+        "idle_keyword": "",
+        "resume_keyword": "",
+        "idle_keyword_second": "",
+        "resume_keyword_second": "",
+        "discord_webhook_url": "",
+        "discord_message": "🎉 搶票成功！\n━━━━━━━━━━━━━━━━━━\n🎤 演唱會：{event_name}\n🎫 張數：{ticket_count}\n⏰ 搶到時間：{time}\n━━━━━━━━━━━━━━━━━━\n🔗 結帳網址：{url}",
+        "telegram_bot_token": "",
+        "telegram_chat_id": "",
+        "telegram_message": "🎉 搶票成功！\n━━━━━━━━━━━━━━━━━━\n🎤 演唱會：{event_name}\n🎫 張數：{ticket_count}\n⏰ 搶到時間：{time}\n━━━━━━━━━━━━━━━━━━\n🔗 結帳網址：{url}",
+        "action_speed_multiplier": 0.4,
+        "show_timing_log": true,
+        "ocr_retry_cooldown": 0.5,
+        "post_submit_reload_guard_seconds": 180,
+        "ticket_number_allow_max_fallback": true,
+        "smart_mode": {
+            "enable": true,
+            "hunting_reload_interval": 0.1,
+            "waiting_reload_interval": 2,
+            "transition_threshold": 3
+        },
+        "network": {
+            "rtt_compensation_enable": true,
+            "compensation_max_ms": 1000,
+            "dynamic_backoff_enable": true,
+            "backoff_max_seconds": 30,
+            "telemetry_log_interval_s": 30
+        },
+        "prefill_script_enable": true
+    },
+    "date_auto_fallback": true,
+    "area_auto_fallback": true
+}
