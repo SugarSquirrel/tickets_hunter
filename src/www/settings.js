@@ -16,6 +16,12 @@ const date_keyword = document.querySelector('#date_keyword');
 const date_auto_fallback = document.querySelector('#date_auto_fallback');
 const area_select_mode = document.querySelector('#area_select_mode');
 const area_keyword = document.querySelector('#area_keyword');
+const area_keyword_slots_div = document.querySelector('#area_keyword_slots');
+const btn_area_kw_add = document.querySelector('#btn_area_kw_add');
+const btn_area_kw_remove = document.querySelector('#btn_area_kw_remove');
+const AREA_KW_MIN_SLOTS = 3;
+const AREA_KW_MAX_SLOTS = 10;
+const AREA_KW_DEFAULT_SLOTS = 5;
 const area_auto_fallback = document.querySelector('#area_auto_fallback');
 const area_price_filter = document.querySelector('#area_price_filter');
 const smart_sort_priority = document.querySelector('#smart_sort_priority');
@@ -192,6 +198,118 @@ function format_config_keyword_for_json(user_input) {
     }
 }
 
+// ============================================================
+// Batch 4 Task C: area_keyword priority slots
+// ============================================================
+// 將 area_keyword 從 textarea 拆成 3-10 個優先級輸入框：
+//   優先 1 [VIP A;VIP B   ]  ← 先試這個（一格內 ; = 同優先級多選）
+//   優先 2 [一般 1000      ]  ← 找不到才退到這個
+//   優先 3 [一般 800       ]
+// 儲存格式不變（JSON-array 字串），底層 tixcraft.py 邏輯零改動。
+
+function _area_kw_current_slot_count() {
+    if (!area_keyword_slots_div) return 0;
+    return area_keyword_slots_div.querySelectorAll('input.area-kw-slot').length;
+}
+
+function _area_kw_create_slot(index, value) {
+    const wrap = document.createElement('div');
+    wrap.className = 'input-group input-group-sm mb-2';
+    const label = document.createElement('span');
+    label.className = 'input-group-text';
+    label.textContent = `優先 ${index + 1}`;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'form-control area-kw-slot';
+    input.placeholder = '留空 = 不使用此格';
+    input.value = value || '';
+    wrap.appendChild(label);
+    wrap.appendChild(input);
+    return wrap;
+}
+
+function _area_kw_rebuild_labels() {
+    if (!area_keyword_slots_div) return;
+    area_keyword_slots_div.querySelectorAll('.input-group').forEach((wrap, idx) => {
+        const lbl = wrap.querySelector('.input-group-text');
+        if (lbl) lbl.textContent = `優先 ${idx + 1}`;
+    });
+}
+
+function _area_kw_update_button_states() {
+    const count = _area_kw_current_slot_count();
+    if (btn_area_kw_add) btn_area_kw_add.disabled = count >= AREA_KW_MAX_SLOTS;
+    if (btn_area_kw_remove) btn_area_kw_remove.disabled = count <= AREA_KW_MIN_SLOTS;
+}
+
+function populate_area_keyword_slots(json_array_string) {
+    if (!area_keyword_slots_div) return;
+    area_keyword_slots_div.innerHTML = '';
+
+    let items = [];
+    const raw = (json_array_string || '').trim();
+    if (raw.length > 0) {
+        try {
+            const parsed = JSON.parse('[' + raw + ']');
+            if (Array.isArray(parsed)) {
+                items = parsed.map(x => (x == null ? '' : String(x)));
+            }
+        } catch (e) {
+            // Fallback: legacy non-JSON format (e.g. plain "A,B,C" or "A;B")
+            console.warn('[area_keyword] JSON parse failed, dumping entire string into slot 1:', raw);
+            items = [raw];
+        }
+    }
+
+    if (items.length > AREA_KW_MAX_SLOTS) {
+        console.warn(`[area_keyword] >${AREA_KW_MAX_SLOTS} items, truncating extras (please verify):`, items.slice(AREA_KW_MAX_SLOTS));
+        items = items.slice(0, AREA_KW_MAX_SLOTS);
+    }
+
+    const slot_count = Math.max(AREA_KW_DEFAULT_SLOTS, items.length, AREA_KW_MIN_SLOTS);
+    for (let i = 0; i < slot_count; i++) {
+        area_keyword_slots_div.appendChild(_area_kw_create_slot(i, items[i] || ''));
+    }
+    _area_kw_update_button_states();
+
+    // Keep hidden mirror input in sync for any downstream code reading #area_keyword.value
+    if (area_keyword) area_keyword.value = raw;
+}
+
+function collect_area_keyword_slots() {
+    if (!area_keyword_slots_div) return '';
+    const inputs = area_keyword_slots_div.querySelectorAll('input.area-kw-slot');
+    const items = [];
+    inputs.forEach(inp => {
+        const v = (inp.value || '').trim();
+        if (v.length > 0) items.push(v);
+    });
+    const json_str = items.length === 0 ? '' : items.map(item => JSON.stringify(item)).join(',');
+    // Sync hidden mirror input.
+    if (area_keyword) area_keyword.value = json_str;
+    return json_str;
+}
+
+if (btn_area_kw_add) {
+    btn_area_kw_add.addEventListener('click', () => {
+        const count = _area_kw_current_slot_count();
+        if (count >= AREA_KW_MAX_SLOTS) return;
+        area_keyword_slots_div.appendChild(_area_kw_create_slot(count, ''));
+        _area_kw_update_button_states();
+    });
+}
+if (btn_area_kw_remove) {
+    btn_area_kw_remove.addEventListener('click', () => {
+        const count = _area_kw_current_slot_count();
+        if (count <= AREA_KW_MIN_SLOTS) return;
+        const wraps = area_keyword_slots_div.querySelectorAll('.input-group');
+        const last = wraps[wraps.length - 1];
+        if (last) last.remove();
+        _area_kw_rebuild_labels();
+        _area_kw_update_button_states();
+    });
+}
+
 // Toggle Cityline login hint visibility based on account input
 function updateCitylineHintVisibility() {
     const citylineHint = document.querySelector('#cityline-login-hint');
@@ -285,7 +403,8 @@ function load_settins_to_form(settings)
         date_auto_fallback.checked = settings.date_auto_fallback || false;
 
         area_select_mode.value = settings.area_auto_select.mode;
-        area_keyword.value = format_keyword_for_display(settings.area_auto_select.area_keyword);
+        // Batch 4 Task C: populate priority slots from JSON-array string.
+        populate_area_keyword_slots(settings.area_auto_select.area_keyword);
         area_auto_fallback.checked = settings.area_auto_fallback || false;
         if (area_price_filter) area_price_filter.value = settings.area_auto_select.price_filter || '';
         if (smart_sort_priority) {
@@ -624,7 +743,8 @@ function save_changes_to_dict(silent_flag)
             settings.date_auto_fallback = date_auto_fallback.checked;
 
             settings.area_auto_select.mode = area_select_mode.value;
-            settings.area_auto_select.area_keyword = format_config_keyword_for_json(area_keyword.value);
+            // Batch 4 Task C: serialize priority slots to JSON-array string.
+            settings.area_auto_select.area_keyword = collect_area_keyword_slots();
             settings.area_auto_select.price_filter = area_price_filter ? area_price_filter.value.trim() : '';
             settings.area_auto_select.smart_sort_priority = smart_sort_priority ? smart_sort_priority.value : 'remaining rank';
             settings.area_auto_select.smart_sort_rank_direction = smart_sort_rank_direction ? smart_sort_rank_direction.value : 'high';

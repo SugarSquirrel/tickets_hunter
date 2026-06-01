@@ -1740,6 +1740,12 @@ async def nodriver_tixcraft_date_auto_select(tab, url, config_dict, domain_name)
         except Exception:
             pass
 
+    # Batch 4 (3.2): report date hit/miss to smart-mode state machine so
+    # "date not yet open" pages don't keep us stuck in hunting (0.1s reload).
+    # Shares the area counter — both situations are "high-frequency reload
+    # producing no result" and should trigger waiting-mode protection.
+    record_area_outcome(found=bool(is_date_clicked), config_dict=config_dict)
+
     return is_date_clicked
 
 async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
@@ -3388,7 +3394,7 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
             if response is None:
                 return
             url = getattr(response, "url", "") or ""
-            if not any(d in url for d in ("tixcraft.com", "indievox.com", "ticketmaster.")):
+            if not any(d in url for d in TIXCRAFT_FAMILY_DOMAINS):
                 return
 
             status = getattr(response, "status", 0) or 0

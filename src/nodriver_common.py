@@ -43,6 +43,10 @@ CONST_MAXBOT_NO_RELOAD_FILE = "MAXBOT_NO_RELOAD.txt"
 # Batch 3: passive network telemetry snapshot for UI / cross-process visibility.
 CONST_MAXBOT_NETWORK_TELEMETRY_FILE = "MAXBOT_NETWORK_TELEMETRY.json"
 
+# Batch 4 (3.4 / 3.6): tixcraft 家族域名集中常數，用於 telemetry filter + OCR 模型自動選擇。
+# teamear.com 是拓元分身（同系統不同網域），加入後 RTT 補償與 OCR 自動套用正確。
+TIXCRAFT_FAMILY_DOMAINS = ("tixcraft.com", "indievox.com", "ticketmaster.", "teamear.com")
+
 
 # ===== Cross-module reload timestamp (Bug 1.6-ⓗ F5 detection) =====
 # Track when bot itself initiated a reload, so the frameNavigated handler can
@@ -73,6 +77,35 @@ def is_reload_disabled():
         return os.path.exists(_no_reload_marker_path())
     except Exception:
         return False
+
+
+def reset_runtime_state_files():
+    """Batch 4 (3.1): clear stale cross-process state files at bot startup.
+
+    Each new bot session deserves a fresh smart-mode / forced-mode / telemetry
+    snapshot — leftover values from a previous session (e.g. waiting mode with
+    145 consecutive misses) would otherwise confuse both the bot's transition
+    logic and the UI's status display.
+
+    Does NOT touch user-controlled markers:
+      - MAXBOT_NO_RELOAD.txt  (user clicked 暫停 auto reload — should survive)
+      - MAXBOT_INT28_IDLE.txt (pause state, lifecycle managed elsewhere)
+      - MAXBOT_LAST_URL.txt   (web UI display)
+      - MAXBOT_QUESTION.txt / MAXBOT_ONLINE_ANSWER.txt (Q&A queue)
+    """
+    working_dir = os.path.dirname(os.path.realpath(__file__))
+    for filename in (
+        "MAXBOT_SMART_MODE.json",
+        "MAXBOT_FORCED_MODE.txt",
+        CONST_MAXBOT_NETWORK_TELEMETRY_FILE,
+        CONST_MAXBOT_NETWORK_TELEMETRY_FILE + ".tmp",  # atomic-write leftover
+    ):
+        path = os.path.join(working_dir, filename)
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception:
+            pass
 
 
 def remove_no_reload_marker():
@@ -544,6 +577,13 @@ def _maybe_emit_backoff_log(base, factor, effective):
         else:
             reason = "n/a"
 
+        # Batch 4 (3.5): annotate forced mode so users who manually set
+        # hunting/waiting understand why their reload interval still got
+        # stretched (backoff applies on top of forced mode for safety).
+        forced = _read_forced_mode()
+        if forced in ("hunting", "waiting"):
+            reason += f", forced={forced}"
+
         print(f"[BACKOFF] Reload interval extended: base={base:.2f}s × factor={factor:.1f} = {effective:.2f}s (reason: {reason})")
     except Exception:
         pass
@@ -665,8 +705,7 @@ def create_ocr_for_platform(config_dict):
 
     # Auto-select based on homepage
     homepage = config_dict.get("homepage", "")
-    tixcraft_domains = ["tixcraft.com", "indievox.com", "ticketmaster."]
-    if any(domain in homepage for domain in tixcraft_domains):
+    if any(domain in homepage for domain in TIXCRAFT_FAMILY_DOMAINS):
         override = dict(config_dict)
         override["ocr_captcha"] = dict(ocr_cfg)
         override["ocr_captcha"]["path"] = CONST_TIXCRAFT_TM_MODEL_PATH

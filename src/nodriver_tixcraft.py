@@ -663,6 +663,10 @@ async def reload_config(config_dict, last_mtime):
 async def main(args):
     config_dict = get_config_dict(args)
 
+    # Batch 4 (3.1): clear stale runtime state files from previous session
+    # so fresh bot session starts with default smart-mode / telemetry state.
+    reset_runtime_state_files()
+
     # Global timestamp: override builtins.print to prepend [HH:MM:SS]
     if config_dict and config_dict.get("advanced", {}).get("show_timestamp", False):
         import builtins
