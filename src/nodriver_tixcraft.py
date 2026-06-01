@@ -627,6 +627,7 @@ async def reload_config(config_dict, last_mtime):
                         "ocr_retry_cooldown",
                         "post_submit_reload_guard_seconds",
                         "ticket_number_allow_max_fallback",
+                        "prefill_script_enable",
                     ]
                     for field in adv_fields:
                         if field in new_config["advanced"]:
@@ -708,6 +709,9 @@ async def main(args):
             initial_tab = driver.main_tab
             if initial_tab:
                 await nodrver_block_urls(initial_tab, config_dict)
+                # Batch 5.2: register CDP prefill script before navigating so
+                # the very first tixcraft page load picks it up.
+                await register_prefill_script(initial_tab, config_dict)
             tab = await nodriver_goto_homepage(driver, config_dict)
             if tab is None:
                 print("[ERROR] Homepage navigation failed. Cannot continue.")
@@ -764,7 +768,13 @@ async def main(args):
     while True:
         await asyncio.sleep(0.05)
 
+        prev_config_mtime = config_mtime
         config_dict, config_mtime = await reload_config(config_dict, config_mtime)
+
+        # Batch 5.2: re-register prefill script when settings.json was just
+        # reloaded so new ticket_number / toggle takes effect on next page load.
+        if config_mtime != prev_config_mtime and tab is not None:
+            await register_prefill_script(tab, config_dict)
 
         # Batch 3 (R-6): periodic [NET] telemetry summary (throttled by setting)
         maybe_emit_telemetry_log(config_dict)

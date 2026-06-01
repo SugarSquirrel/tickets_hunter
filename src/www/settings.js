@@ -77,6 +77,7 @@ const action_speed_multiplier = document.querySelector('#action_speed_multiplier
 const ocr_retry_cooldown = document.querySelector('#ocr_retry_cooldown');
 const post_submit_reload_guard_seconds = document.querySelector('#post_submit_reload_guard_seconds');
 const ticket_number_allow_max_fallback = document.querySelector('#ticket_number_allow_max_fallback');
+const prefill_script_enable = document.querySelector('#prefill_script_enable');
 const smart_mode_enable = document.querySelector('#smart_mode_enable');
 const smart_mode_hunting_reload_interval = document.querySelector('#smart_mode_hunting_reload_interval');
 const smart_mode_waiting_reload_interval = document.querySelector('#smart_mode_waiting_reload_interval');
@@ -460,6 +461,10 @@ function load_settins_to_form(settings)
             const flag = settings.advanced.ticket_number_allow_max_fallback;
             ticket_number_allow_max_fallback.checked = (flag === undefined || flag === null) ? true : !!flag;
         }
+        if (prefill_script_enable) {
+            const flag = settings.advanced.prefill_script_enable;
+            prefill_script_enable.checked = (flag === undefined || flag === null) ? true : !!flag;
+        }
         // Batch 2: smart_mode load (nested object)
         const sm = (settings.advanced && settings.advanced.smart_mode) || {};
         if (smart_mode_enable) {
@@ -785,6 +790,9 @@ function save_changes_to_dict(silent_flag)
             }
             if (ticket_number_allow_max_fallback) {
                 settings.advanced.ticket_number_allow_max_fallback = !!ticket_number_allow_max_fallback.checked;
+            }
+            if (prefill_script_enable) {
+                settings.advanced.prefill_script_enable = !!prefill_script_enable.checked;
             }
             // Batch 2: smart_mode save (nested object)
             if (!settings.advanced.smart_mode || typeof settings.advanced.smart_mode !== 'object') {

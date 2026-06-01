@@ -2316,7 +2316,16 @@ async def nodriver_ticket_number_select_fill(tab, select_obj, ticket_number, sel
         if isinstance(result, dict):
             is_ticket_number_assigned = result.get('success', False)
             if result.get('fallback'):
-                debug.log(f"[TICKET FALLBACK] Requested {ticket_number}, fell back to max available: {result.get('selected')}")
+                selected = result.get('selected', '?')
+                debug.log(f"[TICKET FALLBACK] Requested {ticket_number}, fell back to max available: {selected}")
+                # Batch 5.1: defensive sanity check — typical tixcraft maxQuota=2.
+                # If a future event raises this and our fallback picks >2, the
+                # onchange handler may pop an alert and disrupt the OCR flow.
+                try:
+                    if int(selected) > 2:
+                        debug.log(f"[TICKET FALLBACK] WARNING: selected={selected} exceeds typical maxQuota=2, may trigger onchange alert")
+                except (TypeError, ValueError):
+                    pass
 
     except Exception as exc:
         logger.warning(f"Failed to set ticket number: {exc}")
@@ -2519,27 +2528,24 @@ async def nodriver_tixcraft_assign_ticket_number(tab, config_dict):
         else:
             debug.log(f"[TICKET SELECT] Single option excluded by keyword_exclude: '{ticket_name}'")
 
-    # Fallback logic (similar to area selection)
+    # Fallback logic (Batch 5.1 方案 A: always pick first DOM-order valid)
     if not matched_ticket:
         if area_keyword_array and not area_auto_fallback:
             # Strict mode: no keyword match and fallback disabled
             debug.log(f"[TICKET SELECT] area_auto_fallback=false, fallback is disabled")
             debug.log(f"[TICKET SELECT] No ticket type selected")
             return False, None, None
+
+        # Batch 5.1 方案 A: multi-select fallback always picks the FIRST valid
+        # (DOM order), not a random/mode-based pick. Reason: avoid surprise
+        # picks like "want 福利票, accidentally got 純全票" when keyword
+        # mistypes or area_auto_fallback kicks in.
+        matched_ticket = valid_ticket_types[0]
+        if area_keyword_array:
+            selection_type = "first-valid fallback"
         else:
-            # Fallback enabled or no keyword specified
-            if area_keyword_array:
-                debug.log(f"[TICKET SELECT] area_auto_fallback=true, using fallback selection")
-
-            # Select based on auto_select_mode (pass ticket_info dicts directly)
-            matched_ticket = util.get_target_item_from_matched_list(
-                valid_ticket_types,
-                auto_select_mode
-            )
-
-            if matched_ticket:
-                selection_type = "fallback" if area_keyword_array else "mode-based"
-                debug.log(f"[TICKET SELECT] Selected ticket type ({selection_type}): '{matched_ticket['name']}'")
+            selection_type = "first-valid (no keyword)"
+        debug.log(f"[TICKET SELECT] Selected ticket type ({selection_type}): '{matched_ticket['name']}' (out of {len(valid_ticket_types)} valid)")
 
     # Get select ID for JavaScript operations (select_obj is no longer needed — Bug 1.5-ⓒ)
     select_id = matched_ticket['id'] if matched_ticket else None
@@ -2612,6 +2618,55 @@ async def nodriver_tixcraft_ticket_main(tab, config_dict, ocr, Captcha_Browser, 
         if is_force_submit or _state.get("ocr_completed_url", "") != current_url:
             await nodriver_tixcraft_ticket_main_ocr(tab, config_dict, ocr, Captcha_Browser, domain_name)
         return
+
+    # Batch 5.2: check if the CDP prefill script already did the work
+    # (ticket filled + agreement checked) before bot's main flow got here.
+    prefill_done = False
+    if config_dict.get("advanced", {}).get("prefill_script_enable", True):
+        try:
+            prefill_raw = await tab.evaluate("!!window.__TH_PREFILL_DONE__")
+            prefill_done = bool(util.parse_nodriver_result(prefill_raw))
+        except Exception:
+            prefill_done = False
+
+    if prefill_done:
+        try:
+            verify_raw = await tab.evaluate('''
+                (function() {
+                    var selects = document.querySelectorAll('.mobile-select, select[id*="TicketForm_ticketPrice_"]');
+                    for (var i = 0; i < selects.length; i++) {
+                        if (selects[i].value && selects[i].value !== "0") {
+                            var agree = document.getElementById('TicketForm_agree');
+                            return {
+                                ticket_set: true,
+                                ticket_value: selects[i].value,
+                                select_id: selects[i].id,
+                                agree_checked: !!(agree && agree.checked)
+                            };
+                        }
+                    }
+                    return { ticket_set: false };
+                })();
+            ''')
+            verify_result = util.parse_nodriver_result(verify_raw)
+        except Exception as exc:
+            debug.log(f"[PREFILL] Verify call failed (non-fatal): {exc}")
+            verify_result = None
+
+        if (isinstance(verify_result, dict)
+                and verify_result.get('ticket_set')
+                and verify_result.get('agree_checked')):
+            # Prefill succeeded — record state and jump straight to OCR.
+            _state[ticket_state_key] = True
+            debug.log(
+                "[PREFILL] Verified: select#%s=%s, agreement checked. Jumping to OCR." % (
+                    verify_result.get('select_id'), verify_result.get('ticket_value')
+                )
+            )
+            await nodriver_tixcraft_ticket_main_ocr(tab, config_dict, ocr, Captcha_Browser, domain_name)
+            return
+        else:
+            debug.log(f"[PREFILL] Marker found but verification failed (result={verify_result}), falling back to bot setters")
 
     # Always check agreement checkbox in NoDriver mode
     await nodriver_tixcraft_ticket_main_agree(tab, config_dict)

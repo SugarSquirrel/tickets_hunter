@@ -621,6 +621,156 @@ def maybe_emit_telemetry_log(config_dict):
     except Exception:
         pass
 
+
+# ===== Batch 5.2: CDP prefill script (extension-spirit) =====
+# Inject this script via Page.addScriptToEvaluateOnNewDocument so it runs as
+# early as DOMContentLoaded — well before bot's main loop has a chance to
+# observe the ticket page. Goal: fill ticket count + check agreement +
+# focus captcha input ~200-400ms ahead of bot's normal flow.
+#
+# Bot main flow verifies window.__TH_PREFILL_DONE__ and skips redundant
+# setters when prefill succeeded. On any prefill failure, bot falls back
+# to the existing main-flow setters — prefill is purely opportunistic.
+
+TICKET_PREFILL_SCRIPT = r"""
+(function() {
+  try {
+    var path = location.pathname;
+    if (path.indexOf('/ticket/ticket/') === -1) return;
+
+    var ticketNumber = parseInt(window.__TH_TICKET_NUMBER__ || 2);
+    var allowMaxFallback = (window.__TH_ALLOW_MAX_FALLBACK__ !== false);
+    var debugLog = !!window.__TH_PREFILL_DEBUG__;
+
+    function log(msg) {
+      if (debugLog) console.log('[TH-PREFILL]', msg);
+    }
+
+    function tryFill() {
+      var selects = document.querySelectorAll(
+        '.mobile-select, select[id*="TicketForm_ticketPrice_"]'
+      );
+      if (selects.length === 0) return false;
+
+      var filled = false;
+      // Batch 5.1 方案 A: pick first valid select (DOM order, not random).
+      for (var i = 0; i < selects.length; i++) {
+        var select = selects[i];
+        if (select.disabled) continue;
+
+        var validOpts = [];
+        for (var j = 0; j < select.options.length; j++) {
+          var opt = select.options[j];
+          if (!opt.disabled && parseInt(opt.value) > 0) {
+            validOpts.push(opt);
+          }
+        }
+        if (validOpts.length === 0) continue;
+
+        var target = null;
+        for (var k = 0; k < validOpts.length; k++) {
+          if (parseInt(validOpts[k].value) === ticketNumber) {
+            target = validOpts[k];
+            break;
+          }
+        }
+        if (!target && allowMaxFallback) {
+          target = validOpts.reduce(function(m, o) {
+            return parseInt(o.value) > parseInt(m.value) ? o : m;
+          });
+        }
+        if (!target) continue;
+
+        select.value = target.value;
+        select.selectedIndex = target.index;
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+        log('Filled select#' + select.id + ' = ' + target.value);
+        filled = true;
+        break;
+      }
+
+      var agree = document.getElementById('TicketForm_agree');
+      if (agree && !agree.checked) {
+        agree.checked = true;
+        agree.dispatchEvent(new Event('change', { bubbles: true }));
+        log('Checked agreement');
+      }
+
+      var verify = document.getElementById('TicketForm_verifyCode');
+      if (verify) {
+        try { verify.focus(); } catch(e) {}
+      }
+
+      window.__TH_PREFILL_DONE__ = filled;
+      return filled;
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', tryFill, { once: true });
+    } else {
+      tryFill();
+    }
+
+    // Second-chance: <select> may render after DOMContentLoaded.
+    if (!window.__TH_PREFILL_OBSERVING__) {
+      window.__TH_PREFILL_OBSERVING__ = true;
+      var obs = new MutationObserver(function() {
+        if (window.__TH_PREFILL_DONE__) {
+          obs.disconnect();
+          return;
+        }
+        if (tryFill()) {
+          obs.disconnect();
+        }
+      });
+      obs.observe(document.documentElement, { childList: true, subtree: true });
+      setTimeout(function() {
+        try { obs.disconnect(); } catch(e) {}
+      }, 5000);
+    }
+  } catch (err) {
+    console.error('[TH-PREFILL] Error:', err);
+  }
+})();
+"""
+
+
+async def register_prefill_script(tab, config_dict):
+    """Register Batch 5.2 prefill script on the given tab.
+
+    Re-registers config + script on each call so changes to ticket_number /
+    allow_max_fallback / verbose are picked up by subsequent page loads.
+    Existing already-loaded pages are NOT affected (the script is only run
+    on NEW documents); user needs to navigate or reload to pick up changes.
+    """
+    if not config_dict.get("advanced", {}).get("prefill_script_enable", True):
+        return
+
+    try:
+        ticket_number = int(config_dict.get("ticket_number", 2))
+    except (TypeError, ValueError):
+        ticket_number = 2
+
+    allow_max_fallback = bool(
+        config_dict.get("advanced", {}).get("ticket_number_allow_max_fallback", True)
+    )
+    debug_log = bool(config_dict.get("advanced", {}).get("verbose", False))
+
+    config_script = (
+        f"window.__TH_TICKET_NUMBER__ = {ticket_number};"
+        f"window.__TH_ALLOW_MAX_FALLBACK__ = {'true' if allow_max_fallback else 'false'};"
+        f"window.__TH_PREFILL_DEBUG__ = {'true' if debug_log else 'false'};"
+    )
+
+    debug = util.create_debug_logger(config_dict)
+    try:
+        await tab.send(cdp.page.add_script_to_evaluate_on_new_document(source=config_script))
+        await tab.send(cdp.page.add_script_to_evaluate_on_new_document(source=TICKET_PREFILL_SCRIPT))
+        debug.log(f"[PREFILL] Registered: ticket_number={ticket_number}, allow_max_fallback={allow_max_fallback}")
+    except Exception as exc:
+        debug.log(f"[PREFILL] Failed to register (non-fatal): {exc}")
+
+
 CONST_FROM_TOP_TO_BOTTOM = "from top to bottom"
 CONST_FROM_BOTTOM_TO_TOP = "from bottom to top"
 CONST_CENTER = "center"

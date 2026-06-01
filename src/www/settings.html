@@ -1052,6 +1052,18 @@
             </div>
           </div>
         </div>
+        <div class="row mb-3" data-under="tixcraft">
+          <label class="col-sm-2 col-form-label">頁面 ready 預先填表</label>
+          <div class="col-sm-10 col-lg-8 col-xl-6">
+            <div class="form-check form-switch">
+              <input class="form-check-input highlight-field" type="checkbox" id="prefill_script_enable" checked>
+              <label class="form-check-label fw-bold" for="prefill_script_enable">啟用(在頁面 ready 那一刻自動填票數 + 勾同意 + focus 驗證碼框)</label>
+            </div>
+            <small class="form-text text-muted d-block mt-1">
+              透過 CDP 注入 JS 腳本，在頁面 DOMContentLoaded 那一刻就完成「填票數 + 勾同意 + focus 驗證碼框」三件事 — 比 bot 主流程約早 200~400ms。bot 進到票券頁時會驗證預載結果，成功則跳過重複操作。<strong>失敗會自動退回 bot 主流程救援</strong>，不會讓搶票流程壞掉。預設 <strong>啟用</strong>；若懷疑頁面有異常可關閉退回純 bot 主流程。
+            </small>
+          </div>
+        </div>
 
         <h5 class="settings-section-header">🤖 OCR 驗證碼</h5>
 

@@ -226,6 +226,8 @@ def get_default_config():
     # When True (default), fall back to max available ticket count when the
     # exact requested count isn't selectable. False = strict mode (reload-retry).
     config_dict["advanced"]["ticket_number_allow_max_fallback"] = True
+    # Batch 5.2: CDP prefill script — fills ticket + agreement at DOMContentLoaded.
+    config_dict["advanced"]["prefill_script_enable"] = True
     # Batch 2: smart hunting/waiting mode for tixcraft area-select reload pacing.
     config_dict["advanced"]["smart_mode"] = {
         "enable": True,
@@ -353,6 +355,8 @@ def migrate_config(config_dict):
         # they should manually bump it via the settings UI.
         config_dict["advanced"].setdefault("post_submit_reload_guard_seconds", 180.0)
         config_dict["advanced"].setdefault("ticket_number_allow_max_fallback", True)
+        # Batch 5.2: CDP prefill toggle.
+        config_dict["advanced"].setdefault("prefill_script_enable", True)
         # Batch 2: smart hunting/waiting mode.
         config_dict["advanced"].setdefault("smart_mode", {})
         if isinstance(config_dict["advanced"].get("smart_mode"), dict):
