@@ -581,6 +581,45 @@
               </div>
             </div>
 
+            <details class="mt-2">
+              <summary class="text-muted small" style="cursor:pointer;">📖 使用情境範例（點擊展開）</summary>
+              <div class="alert alert-info py-2 mt-2 mb-0 small">
+                <p class="mb-2"><strong>「區域關鍵字」是篩<u>區域名稱</u>，篩<u>價格</u>請用「接受的價位」欄位。</strong>下面是幾個常見情境：</p>
+
+                <p class="mb-1 mt-3"><strong>情境 1：只想要 VIP 區，任何價位都可</strong></p>
+                <ul class="mb-2 ps-3">
+                  <li>區域關鍵字 → 優先 1: <code>VIP</code>（其他格留空）</li>
+                  <li>接受的價位 → 留空</li>
+                  <li>排序優先 → 從上到下</li>
+                </ul>
+
+                <p class="mb-1 mt-3"><strong>情境 2：只想要 5980 元的位子，區域隨便</strong></p>
+                <ul class="mb-2 ps-3">
+                  <li>區域關鍵字 → <strong>全部留空</strong>（重點：不要把 <code>5980</code> 寫進區域關鍵字，那是篩「區域名稱含 5980」變很窄）</li>
+                  <li>接受的價位 → <code>5980</code></li>
+                  <li>排序優先 → 從上到下（或隨機）</li>
+                </ul>
+
+                <p class="mb-1 mt-3"><strong>情境 3：想要 4980-5980 範圍，優先 VIP，沒有再退一般</strong></p>
+                <ul class="mb-2 ps-3">
+                  <li>區域關鍵字 → 優先 1: <code>VIP</code> / 優先 2: <code>一般</code></li>
+                  <li>接受的價位 → <code>4980-5980</code></li>
+                  <li>排序優先 → 從上到下</li>
+                </ul>
+
+                <p class="mb-1 mt-3"><strong>情境 4：想要紅 1/2 區或紫 1 區（智能模式）</strong></p>
+                <ul class="mb-2 ps-3">
+                  <li>區域關鍵字 → 優先 1: <code>紅1區;紅2區</code>（同優先級 OR） / 優先 2: <code>紫1區</code>（次選）</li>
+                  <li>接受的價位 → 視預算，例如 <code>&lt;=6000</code></li>
+                  <li>排序優先 → 剩餘數量 rank（智能模式才有）</li>
+                </ul>
+
+                <p class="mb-0 mt-3 text-muted">
+                  <strong>常見錯誤：</strong>把價格寫進區域關鍵字（如 <code>4980</code>）→ 只匹配「區域名稱含 4980」的區，會錯過名稱沒寫價的同價位區。價格篩選請用「接受的價位」欄位。
+                </p>
+              </div>
+            </details>
+
             <div class="alert alert-info py-2 mt-2 mb-0 small smart-only" id="area_keyword_smart_hint" style="display:none;">
               <strong>🧠 智能模式生效</strong>　使用智能匹配規則：
               <ul class="mb-1 mt-1 ps-3">
