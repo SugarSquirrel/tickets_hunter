@@ -78,6 +78,7 @@ const ocr_retry_cooldown = document.querySelector('#ocr_retry_cooldown');
 const post_submit_reload_guard_seconds = document.querySelector('#post_submit_reload_guard_seconds');
 const ticket_number_allow_max_fallback = document.querySelector('#ticket_number_allow_max_fallback');
 const prefill_script_enable = document.querySelector('#prefill_script_enable');
+const post_failure_lockdown_seconds = document.querySelector('#post_failure_lockdown_seconds');
 const smart_mode_enable = document.querySelector('#smart_mode_enable');
 const smart_mode_hunting_reload_interval = document.querySelector('#smart_mode_hunting_reload_interval');
 const smart_mode_waiting_reload_interval = document.querySelector('#smart_mode_waiting_reload_interval');
@@ -465,6 +466,10 @@ function load_settins_to_form(settings)
             const flag = settings.advanced.prefill_script_enable;
             prefill_script_enable.checked = (flag === undefined || flag === null) ? true : !!flag;
         }
+        if (post_failure_lockdown_seconds) {
+            const v = settings.advanced.post_failure_lockdown_seconds;
+            post_failure_lockdown_seconds.value = (v === undefined || v === null) ? 30 : v;
+        }
         // Batch 2: smart_mode load (nested object)
         const sm = (settings.advanced && settings.advanced.smart_mode) || {};
         if (smart_mode_enable) {
@@ -793,6 +798,10 @@ function save_changes_to_dict(silent_flag)
             }
             if (prefill_script_enable) {
                 settings.advanced.prefill_script_enable = !!prefill_script_enable.checked;
+            }
+            if (post_failure_lockdown_seconds) {
+                const raw = parseInt(post_failure_lockdown_seconds.value, 10);
+                settings.advanced.post_failure_lockdown_seconds = (Number.isFinite(raw) && raw >= 0 && raw <= 600) ? raw : 30;
             }
             // Batch 2: smart_mode save (nested object)
             if (!settings.advanced.smart_mode || typeof settings.advanced.smart_mode !== 'object') {
@@ -1746,6 +1755,10 @@ async function refreshSmartModeStatus() {
         }
         if (data.forced_mode && data.forced_mode !== 'auto') {
             modeLabel += ' 【手動強制】';
+        }
+        // Batch 6.1: post-failure lockdown countdown
+        if (data.post_failure_lockdown_active) {
+            modeLabel += ` 🔒 售完保護 ${data.post_failure_lockdown_seconds_remaining || 0}s`;
         }
         smartModeText.textContent = modeLabel;
         if (smartModeForceSelect && smartModeForceSelect.value !== (data.forced_mode || 'auto')) {

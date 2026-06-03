@@ -3350,6 +3350,24 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
                 debug.log("[GLOBAL ALERT] Sold out detected, clearing form_submitted_at to unblock reload guard")
                 _state["form_submitted_at"] = 0
 
+            # Batch 6.1: trigger post-failure lockdown so idle_keyword_second
+            # pause windows kick in even if smart-mode is still in hunting.
+            # Prevents the 0.3s rapid-reload spike that follows sold-out.
+            try:
+                lockdown_raw = config_dict.get("advanced", {}).get("post_failure_lockdown_seconds", 30)
+                try:
+                    lockdown_seconds = int(lockdown_raw)
+                    if lockdown_seconds < 0 or lockdown_seconds > 600:
+                        lockdown_seconds = 30
+                except (TypeError, ValueError):
+                    lockdown_seconds = 30
+                if lockdown_seconds > 0:
+                    from nodriver_common import set_post_failure_lockdown
+                    set_post_failure_lockdown(lockdown_seconds)
+                    debug.log(f"[LOCKDOWN] Post-failure lockdown active for {lockdown_seconds}s — bot will respect 秒級暫停 even in hunting mode")
+            except Exception as lockdown_exc:
+                debug.log(f"[LOCKDOWN] Failed to activate (non-fatal): {lockdown_exc}")
+
             interval = config_dict["advanced"].get("auto_reload_page_interval", 0)
             if interval > 0:
                 cooldown_until = time.time() + interval
@@ -3504,6 +3522,14 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
         if is_reload_disabled():
             if remove_no_reload_marker():
                 debug.log(f"[GUARD] (marker auto-removed) Reached safe URL ({url}), removed MAXBOT_NO_RELOAD.txt")
+
+        # Batch 6.1: also clear post-failure lockdown — reaching a safe URL
+        # means the previous failure recovery is complete (or unrelated), so
+        # there's no reason to keep forcing waiting mode.
+        from nodriver_common import is_in_post_failure_lockdown, clear_post_failure_lockdown
+        if is_in_post_failure_lockdown():
+            clear_post_failure_lockdown()
+            debug.log(f"[LOCKDOWN] Reached safe URL ({url}), clearing post-failure lockdown")
 
     # EPS block detection for tixcraft and ticketmaster domains (Issue #289)
     if 'tixcraft.com' in url or 'ticketmaster' in url:

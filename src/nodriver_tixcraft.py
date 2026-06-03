@@ -628,6 +628,7 @@ async def reload_config(config_dict, last_mtime):
                         "post_submit_reload_guard_seconds",
                         "ticket_number_allow_max_fallback",
                         "prefill_script_enable",
+                        "post_failure_lockdown_seconds",
                     ]
                     for field in adv_fields:
                         if field in new_config["advanced"]:

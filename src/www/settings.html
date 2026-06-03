@@ -1103,6 +1103,15 @@
             </small>
           </div>
         </div>
+        <div class="row mb-3" data-under="tixcraft">
+          <label for="post_failure_lockdown_seconds" class="col-sm-2 col-form-label">售完後鎖定(秒)</label>
+          <div class="col-sm-10 col-lg-8 col-xl-6">
+            <input class="form-control highlight-field" id="post_failure_lockdown_seconds" type="number" step="1" min="0" max="600" value="30" />
+            <small class="form-text text-muted d-block mt-1">
+              售完 alert 觸發後，<strong>強制智慧模式進入「等待」模式</strong>持續 N 秒，讓「秒數暫停關鍵字」有機會在窗口內生效暫停 bot — 避免送出失敗後 bot 在你來不及反應前連續高頻刷頁被軟鎖。預設 <strong>30</strong>（涵蓋約 3 個典型 10 秒暫停週期）；<strong>0</strong> = 關閉此保護。URL 進到區域/訂單/結帳頁時自動解除。
+            </small>
+          </div>
+        </div>
 
         <h5 class="settings-section-header">🤖 OCR 驗證碼</h5>
 

@@ -133,10 +133,15 @@ def remove_no_reload_marker():
 # Both processes read these files for cross-process consistent decisions.
 
 _smart_mode_state = {
-    "current_mode": "hunting",       # "hunting" or "waiting"
-    "consecutive_misses": 0,         # miss counter (reset on hit)
-    "last_mode_change_at": 0.0,      # timestamp of last mode transition
-    "forced_mode": "auto",           # "auto" | "hunting" | "waiting"
+    "current_mode": "hunting",            # "hunting" or "waiting"
+    "consecutive_misses": 0,              # miss counter (reset on hit)
+    "last_mode_change_at": 0.0,           # timestamp of last mode transition
+    "forced_mode": "auto",                # "auto" | "hunting" | "waiting"
+    # Batch 6.1: timestamp when post-failure lockdown expires (0 = no lockdown).
+    # When > now(), get_effective_mode() returns "waiting" regardless of
+    # forced_mode — bridges the idle_keyword_second gate that Batch 2 S-4
+    # otherwise bypasses during hunting mode.
+    "post_failure_lockdown_until": 0.0,
 }
 
 
@@ -155,6 +160,9 @@ def _persist_smart_state():
             "current_mode": _smart_mode_state.get("current_mode", "hunting"),
             "consecutive_misses": _smart_mode_state.get("consecutive_misses", 0),
             "last_mode_change_at": _smart_mode_state.get("last_mode_change_at", 0.0),
+            # Batch 6.1: lockdown expiry must be visible to tornado server
+            # so /api/smart-mode GET can show countdown to the UI.
+            "post_failure_lockdown_until": _smart_mode_state.get("post_failure_lockdown_until", 0.0),
         }
         with open(_smart_state_file_path(), "w", encoding="utf-8") as f:
             json.dump(payload, f)
@@ -164,7 +172,12 @@ def _persist_smart_state():
 
 def _load_persisted_smart_state():
     """Read MAXBOT_SMART_MODE.json. Returns dict with safe defaults on any error."""
-    defaults = {"current_mode": "hunting", "consecutive_misses": 0, "last_mode_change_at": 0.0}
+    defaults = {
+        "current_mode": "hunting",
+        "consecutive_misses": 0,
+        "last_mode_change_at": 0.0,
+        "post_failure_lockdown_until": 0.0,
+    }
     try:
         path = _smart_state_file_path()
         if not os.path.exists(path):
@@ -175,6 +188,7 @@ def _load_persisted_smart_state():
             "current_mode": data.get("current_mode", "hunting") if data.get("current_mode") in ("hunting", "waiting") else "hunting",
             "consecutive_misses": int(data.get("consecutive_misses", 0) or 0),
             "last_mode_change_at": float(data.get("last_mode_change_at", 0.0) or 0.0),
+            "post_failure_lockdown_until": float(data.get("post_failure_lockdown_until", 0.0) or 0.0),
         }
     except Exception:
         return defaults
@@ -220,6 +234,8 @@ def get_smart_mode_state():
         "consecutive_misses": persisted["consecutive_misses"],
         "last_mode_change_at": persisted["last_mode_change_at"],
         "forced_mode": forced,
+        # Batch 6.1: expose lockdown timestamp for tornado server / UI.
+        "post_failure_lockdown_until": persisted.get("post_failure_lockdown_until", 0.0),
     }
 
 
@@ -233,6 +249,12 @@ def get_effective_mode(config_dict):
         enable = config_dict.get("advanced", {}).get("smart_mode", {}).get("enable", True)
         if not enable:
             return "hunting"
+        # Batch 6.1: lockdown overrides everything (including forced_mode).
+        # When sold-out alert recently fired, force "waiting" so the
+        # idle_keyword_second gate in settings.py can rescue the user
+        # from accidental high-frequency reloads.
+        if is_in_post_failure_lockdown():
+            return "waiting"
         forced = _read_forced_mode()
         if forced in ("hunting", "waiting"):
             return forced
@@ -313,6 +335,51 @@ def set_forced_mode(mode):
     else:
         print(f"[SMART] Mode forced: → auto (resume automatic switching)")
     return mode
+
+
+# ===== Batch 6.1: Post-failure lockdown =====
+# After a sold-out alert, bot returns to area page in hunting mode (Batch 2
+# clears form_submitted_at + misses=0). Batch 2 S-4 gates idle_keyword_second
+# pause windows in hunting mode → bot rapid-fires until 3 consecutive misses
+# force waiting mode. The 0.3s spike isn't catastrophic on its own, but if
+# server keeps returning sold-out the cycle repeats and accumulated reload
+# pressure can trigger soft-block.
+#
+# Lockdown forces effective mode = "waiting" for N seconds after sold-out
+# (default 30), so idle_keyword_second pause windows kick in and the user has
+# a chance to react before bot torches the account.
+
+def set_post_failure_lockdown(seconds=30):
+    """Activate lockdown for N seconds. Forces get_effective_mode → "waiting".
+    Persists to MAXBOT_SMART_MODE.json so tornado server's /api/smart-mode
+    GET handler can read it for UI countdown display.
+    """
+    try:
+        secs = max(0, int(seconds))
+    except (TypeError, ValueError):
+        secs = 0
+    _smart_mode_state["post_failure_lockdown_until"] = time.time() + secs if secs > 0 else 0.0
+    _persist_smart_state()
+
+
+def is_in_post_failure_lockdown():
+    """True if lockdown is currently active. Reads file for cross-process
+    consistency (tornado server polls this from a separate process).
+    """
+    try:
+        # File-backed read so server process sees bot's lockdown decisions.
+        persisted = _load_persisted_smart_state()
+        until = persisted.get("post_failure_lockdown_until", 0.0)
+        return until > time.time()
+    except Exception:
+        return False
+
+
+def clear_post_failure_lockdown():
+    """Cancel lockdown immediately (typically on safe-URL transition)."""
+    if _smart_mode_state.get("post_failure_lockdown_until", 0.0) > 0:
+        _smart_mode_state["post_failure_lockdown_until"] = 0.0
+        _persist_smart_state()
 
 
 def _get_mode_base_interval(config_dict):

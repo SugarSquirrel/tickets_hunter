@@ -228,6 +228,8 @@ def get_default_config():
     config_dict["advanced"]["ticket_number_allow_max_fallback"] = True
     # Batch 5.2: CDP prefill script — fills ticket + agreement at DOMContentLoaded.
     config_dict["advanced"]["prefill_script_enable"] = True
+    # Batch 6.1: post-failure lockdown — sold-out alert forces waiting mode N seconds.
+    config_dict["advanced"]["post_failure_lockdown_seconds"] = 30
     # Batch 2: smart hunting/waiting mode for tixcraft area-select reload pacing.
     config_dict["advanced"]["smart_mode"] = {
         "enable": True,
@@ -357,6 +359,8 @@ def migrate_config(config_dict):
         config_dict["advanced"].setdefault("ticket_number_allow_max_fallback", True)
         # Batch 5.2: CDP prefill toggle.
         config_dict["advanced"].setdefault("prefill_script_enable", True)
+        # Batch 6.1: post-failure lockdown seconds.
+        config_dict["advanced"].setdefault("post_failure_lockdown_seconds", 30)
         # Batch 2: smart hunting/waiting mode.
         config_dict["advanced"].setdefault("smart_mode", {})
         if isinstance(config_dict["advanced"].get("smart_mode"), dict):
@@ -693,11 +697,16 @@ class SmartModeHandler(tornado.web.RequestHandler):
     def get(self):
         from nodriver_common import get_smart_mode_state
         state = get_smart_mode_state()
+        # Batch 6.1: lockdown countdown for UI display.
+        lockdown_until = state.get("post_failure_lockdown_until", 0.0) or 0.0
+        lockdown_remaining = max(0, int(lockdown_until - time.time()))
         self.write({
             "current_mode": state.get("current_mode", "hunting"),
             "consecutive_misses": state.get("consecutive_misses", 0),
             "forced_mode": state.get("forced_mode", "auto"),
             "last_mode_change_at": state.get("last_mode_change_at", 0),
+            "post_failure_lockdown_active": lockdown_remaining > 0,
+            "post_failure_lockdown_seconds_remaining": lockdown_remaining,
         })
 
     def post(self):
