@@ -3159,6 +3159,34 @@ async def nodriver_tixcraft_ticket_main_ocr(tab, config_dict, ocr, Captcha_Brows
             _state["form_submitted_at"] = time.time()
             debug.log(f"[GUARD] form_submitted_at recorded at {_state['form_submitted_at']:.3f}")
 
+            # Batch 6.2 hotfix (Issue 2): pre-emptively activate post-failure
+            # lockdown the moment the form is submitted — NOT only after a
+            # sold-out alert. Rationale:
+            # - Without pre-emptive lockdown, the bot sits in "hunting" mode
+            #   while server processes the submission (5-15s).
+            # - During that window, settings.py polling thread's Batch 2 S-4
+            #   gate would skip maxbot_idle() because mode != "waiting".
+            # - If the user's idle_keyword_second pause moment falls within
+            #   that window, the marker is never created → bot stays unpaused
+            #   when failure rolls back, → rapid-reload → soft-block risk.
+            # - Pre-emptive lockdown forces mode = "waiting" immediately so
+            #   the pause marker creation works regardless of how the grab
+            #   ultimately resolves (success / sold-out / silent rollback).
+            try:
+                lockdown_raw = config_dict.get("advanced", {}).get("post_failure_lockdown_seconds", 30)
+                try:
+                    lockdown_seconds = int(lockdown_raw)
+                    if lockdown_seconds < 0 or lockdown_seconds > 600:
+                        lockdown_seconds = 30
+                except (TypeError, ValueError):
+                    lockdown_seconds = 30
+                if lockdown_seconds > 0:
+                    from nodriver_common import set_post_failure_lockdown
+                    set_post_failure_lockdown(lockdown_seconds)
+                    debug.log(f"[LOCKDOWN] Pre-emptive lockdown active for {lockdown_seconds}s on form submit — bridges hunting → waiting so 秒級暫停 marker can be created during server processing")
+            except Exception as lockdown_exc:
+                debug.log(f"[LOCKDOWN] Failed to activate pre-emptive lockdown (non-fatal): {lockdown_exc}")
+
 # JS snippet that returns "blocked" only when the current page is the actual
 # PerimeterX EPS block page (action === "block"). Returning a string keeps the
 # CDP round-trip simple — zendriver mangles native object/array returns.
@@ -3515,21 +3543,29 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
             debug.log(f"[GUARD] (URL-cleared) Left /ticket/ticket after {elapsed:.1f}s, clearing form_submitted_at")
             _state["form_submitted_at"] = 0
 
-    # Bug 1.6-ⓘ Layer D: auto-remove marker when we reach a safe URL.
+    # Bug 1.6-ⓘ Layer D: auto-remove no-reload marker when we reach a safe URL.
     # Defines "safe" as having advanced past the captcha submit point.
+    # Includes /ticket/area/ because reaching ANY of these URLs means
+    # whatever critical action was protected is now past.
     safe_url_keywords = ['/ticket/area/', '/ticket/order', '/ticket/checkout']
     if any(kw in url for kw in safe_url_keywords):
         if is_reload_disabled():
             if remove_no_reload_marker():
                 debug.log(f"[GUARD] (marker auto-removed) Reached safe URL ({url}), removed MAXBOT_NO_RELOAD.txt")
 
-        # Batch 6.1: also clear post-failure lockdown — reaching a safe URL
-        # means the previous failure recovery is complete (or unrelated), so
-        # there's no reason to keep forcing waiting mode.
+    # Batch 6.2 hotfix (Issue 2): lockdown-clearing uses a STRICTER list than
+    # the marker-clearing list above. /ticket/area/ is ambiguous — it could
+    # mean "user is advancing forward into area selection" OR "grab failed
+    # and server rolled back here". Treating /ticket/area/ as a success
+    # signal incorrectly cleared lockdown after failed grabs, defeating the
+    # whole point. Only /ticket/order and /ticket/checkout are unambiguous
+    # successes — those alone should clear the lockdown.
+    success_url_keywords = ['/ticket/order', '/ticket/checkout']
+    if any(kw in url for kw in success_url_keywords):
         from nodriver_common import is_in_post_failure_lockdown, clear_post_failure_lockdown
         if is_in_post_failure_lockdown():
             clear_post_failure_lockdown()
-            debug.log(f"[LOCKDOWN] Reached safe URL ({url}), clearing post-failure lockdown")
+            debug.log(f"[LOCKDOWN] Reached order/checkout URL ({url}), clearing post-failure lockdown")
 
     # EPS block detection for tixcraft and ticketmaster domains (Issue #289)
     if 'tixcraft.com' in url or 'ticketmaster' in url:

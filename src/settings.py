@@ -542,10 +542,19 @@ def change_maxbot_status_by_keyword():
     # mustn't be interrupted by a periodic second-pause. The gate only
     # applies to the *pause* (idle) keyword — the *resume* keyword still
     # runs unconditionally so a stuck pause can always recover.
+    #
+    # Batch 6.2 hotfix: the gate is tixcraft-specific. Other platforms
+    # (KKTIX / iBon / 寬宏 / hkticketing / funone / etc.) never call
+    # record_area_outcome so their smart-mode current_mode stays at the
+    # "hunting" default forever — gating would permanently disable their
+    # idle_keyword_second pause. Limit the gate to tixcraft-family
+    # homepages only.
     if len(config_dict["advanced"]["idle_keyword_second"]) > 0:
-        from nodriver_common import get_effective_mode
+        from nodriver_common import get_effective_mode, TIXCRAFT_FAMILY_DOMAINS
+        homepage = config_dict.get("homepage", "") or ""
+        is_tixcraft_homepage = any(d in homepage for d in TIXCRAFT_FAMILY_DOMAINS)
         sm_enabled = config_dict.get("advanced", {}).get("smart_mode", {}).get("enable", True)
-        should_gate = sm_enabled and get_effective_mode(config_dict) != "waiting"
+        should_gate = is_tixcraft_homepage and sm_enabled and get_effective_mode(config_dict) != "waiting"
         if not should_gate:
             is_matched = util.is_text_match_keyword(config_dict["advanced"]["idle_keyword_second"], current_time)
             if is_matched:
