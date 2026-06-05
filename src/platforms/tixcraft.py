@@ -3553,19 +3553,23 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
             if remove_no_reload_marker():
                 debug.log(f"[GUARD] (marker auto-removed) Reached safe URL ({url}), removed MAXBOT_NO_RELOAD.txt")
 
-    # Batch 6.2 hotfix (Issue 2): lockdown-clearing uses a STRICTER list than
-    # the marker-clearing list above. /ticket/area/ is ambiguous — it could
-    # mean "user is advancing forward into area selection" OR "grab failed
-    # and server rolled back here". Treating /ticket/area/ as a success
-    # signal incorrectly cleared lockdown after failed grabs, defeating the
-    # whole point. Only /ticket/order and /ticket/checkout are unambiguous
-    # successes — those alone should clear the lockdown.
-    success_url_keywords = ['/ticket/order', '/ticket/checkout']
+    # Batch 6.3 hotfix (Issue 2 v2): lockdown-clear list is now STRICT —
+    # ONLY /ticket/checkout. Earlier we also cleared on /ticket/order, but
+    # real-world logs showed:
+    #   1. Form submit → /ticket/ticket
+    #   2. Server response → /ticket/order  (個資填寫頁，bot 暫存座位)
+    #   3. ~5s later → 踢回 /ticket/area/   (個資沒填好 / 時間到 / 別人付款)
+    # So /ticket/order is an INTERMEDIATE page that can still roll back.
+    # Only /ticket/checkout (付款頁) means the seat is truly reserved in
+    # the user's name — at that point bot's job is done, lockdown can clear.
+    # If lockdown's 30s timeout fires before reaching /ticket/checkout,
+    # that's still fine — bot returns to normal mode for the next grab cycle.
+    success_url_keywords = ['/ticket/checkout']
     if any(kw in url for kw in success_url_keywords):
         from nodriver_common import is_in_post_failure_lockdown, clear_post_failure_lockdown
         if is_in_post_failure_lockdown():
             clear_post_failure_lockdown()
-            debug.log(f"[LOCKDOWN] Reached order/checkout URL ({url}), clearing post-failure lockdown")
+            debug.log(f"[LOCKDOWN] Reached checkout URL ({url}), clearing post-failure lockdown")
 
     # EPS block detection for tixcraft and ticketmaster domains (Issue #289)
     if 'tixcraft.com' in url or 'ticketmaster' in url:
