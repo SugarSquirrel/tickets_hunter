@@ -1848,17 +1848,18 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
         record_area_outcome(found=False, config_dict=config_dict)
 
     if target_area:
-        # T013: Log selected area with selection type
+        # Batch 7 hotfix: target_area is now always a dict of the form
+        # {"index": int, "text": str, "element": Element|None}.
+        # "element" is None on the fast path (batch eval succeeded) — we
+        # never materialised the zendriver Element to save a CDP round-trip.
+        # "element" is a real Element on the per-row fallback path.
         if debug.enabled:
             try:
-                area_text = await target_area.text
-                if not area_text:
-                    area_text = await target_area.inner_text
-                area_text = area_text.strip()[:80] if area_text else "Unknown"
+                area_text = (target_area.get("text") or "").strip()[:80] or "Unknown"
                 selection_type = "fallback" if is_fallback_selection else "keyword match"
                 debug.log(f"[AREA SELECT] Selected area: {area_text} ({selection_type})")
             except:
-                pass  # If text extraction fails, skip logging
+                pass
 
         # We're about to click into a real target — lock pause for the rest
         # of the checkout flow so the seconds-keyword schedule won't strand
@@ -1867,12 +1868,35 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
         set_grabbing_critical(True)
         debug.log(f"[AREA SELECT] Pause schedule locked: grabbing critical path engaged")
 
-        try:
-            await target_area.click()
-            log_timing("T_area_clicked", _timing_state, config_dict)
-        except:
+        target_element = target_area.get("element")
+        target_index_0 = max(0, int(target_area.get("index", 1)) - 1)
+
+        click_done = False
+        if target_element is not None:
+            # Fallback path: we have a real Element, click it directly.
             try:
-                await target_area.evaluate('el => el.click()')
+                await target_element.click()
+                log_timing("T_area_clicked", _timing_state, config_dict)
+                click_done = True
+            except:
+                try:
+                    await target_element.evaluate('el => el.click()')
+                    log_timing("T_area_clicked", _timing_state, config_dict)
+                    click_done = True
+                except:
+                    pass
+
+        if not click_done:
+            # Fast path (or Element click failed): click via JS by DOM index.
+            # Single tab.evaluate call — far cheaper than materialising N
+            # Element wrappers just to call one .click() on one of them.
+            try:
+                await tab.evaluate(
+                    "(function(){"
+                    "var els=document.querySelectorAll('.zone a');"
+                    f"if(els && els[{target_index_0}]) els[{target_index_0}].click();"
+                    "})();"
+                )
                 log_timing("T_area_clicked", _timing_state, config_dict)
             except:
                 pass
@@ -1993,25 +2017,29 @@ async def nodriver_get_tixcraft_target_area(tab, el, config_dict, area_keyword_i
         debug.log(f"[AREA KEYWORD] Batch evaluate failed, will fall back per-row: {exc}")
         batch_data = None
 
-    try:
-        area_list = await el.query_selector_all('a')
-    except:
-        debug.log(f"[AREA KEYWORD] Failed to query area list")
-        return True, None
+    # Batch 7 hotfix: skip el.query_selector_all('a') entirely on the fast
+    # path. That CDP call returns N Python Element wrappers (~200-400ms on
+    # BTS-class pages with hundreds of <li> in .zone). We don't actually
+    # need Element objects for matching — only for clicking. Defer the
+    # element fetch (or skip it entirely via JS click-by-index).
+    use_batch = isinstance(batch_data, list) and len(batch_data) > 0
+    area_list = None  # only populated on the fallback path
 
-    if not area_list or len(area_list) == 0:
-        debug.log(f"[AREA KEYWORD] No areas found")
-        return True, None
+    if not use_batch:
+        try:
+            area_list = await el.query_selector_all('a')
+        except:
+            debug.log(f"[AREA KEYWORD] Failed to query area list")
+            return True, None
 
-    # If batch returned a different count than the live element list (DOM
-    # mutated between the two calls), fall back to per-row reads to stay
-    # correct rather than risk a misalignment.
-    use_batch = (
-        isinstance(batch_data, list)
-        and len(batch_data) == len(area_list)
-    )
+        if not area_list or len(area_list) == 0:
+            debug.log(f"[AREA KEYWORD] No areas found")
+            return True, None
+        item_count = len(area_list)
+    else:
+        item_count = len(batch_data)
 
-    debug.log(f"[AREA KEYWORD] Found {len(area_list)} area(s) to check"
+    debug.log(f"[AREA KEYWORD] Found {item_count} area(s) to check"
               + (" (batched)" if use_batch else " (per-row fallback)"))
     debug.log(f"[AREA KEYWORD] ========================================")
 
@@ -2023,9 +2051,11 @@ async def nodriver_get_tixcraft_target_area(tab, el, config_dict, area_keyword_i
     # Filled in by find_price_tier_index using price_tiers.
     smart_tier_indices = []
 
-    for area_index, row in enumerate(area_list, start=1):
-        # Resolve row_text + font_text without any extra async DOM call when
-        # the batch succeeded.
+    for area_index in range(1, item_count + 1):
+        # On the batch path `row` is None — we don't materialise Element
+        # objects unless absolutely necessary. On the fallback path `row`
+        # is the zendriver Element so per-row .get_html() / font query works.
+        row = area_list[area_index - 1] if not use_batch else None
         font_text = ""
         if use_batch:
             try:
@@ -2049,8 +2079,11 @@ async def nodriver_get_tixcraft_target_area(tab, el, config_dict, area_keyword_i
             debug.log(f"[AREA KEYWORD] [{area_index}] Excluded by keyword_exclude")
             continue
 
-        debug.log(f"[AREA KEYWORD] [{area_index}/{len(area_list)}] Checking: {row_text[:80]}...")
+        debug.log(f"[AREA KEYWORD] [{area_index}/{item_count}] Checking: {row_text[:80]}...")
 
+        # Batch 7 hotfix: keep the unformatted text for display/logging so the
+        # caller doesn't have to await target_area.text (saves a CDP round-trip).
+        display_row_text = row_text
         row_text = util.format_keyword_string(row_text)
 
         # Check keyword match (smart mode uses smart_area_match; legacy modes use AND-on-space substring)
@@ -2128,7 +2161,7 @@ async def nodriver_get_tixcraft_target_area(tab, el, config_dict, area_keyword_i
                 debug.log(f"[AREA SMART]   Price {area_price} matches no tier of {price_tiers}, skipping")
                 continue
             debug.log(f"[AREA SMART]   PASS price={area_price} remaining={remaining_count} tier={tier_idx} font='{font_text.strip()}'")
-            matched_blocks.append(row)
+            matched_blocks.append({"index": area_index, "text": display_row_text, "element": row})
             smart_remaining_counts.append(remaining_count)
             smart_prices.append(area_price if area_price is not None else 0)
             smart_tier_indices.append(tier_idx if tier_idx is not None else 0)
@@ -2146,7 +2179,7 @@ async def nodriver_get_tixcraft_target_area(tab, el, config_dict, area_keyword_i
             else:
                 debug.log(f"[AREA KEYWORD]   Sufficient seats available")
 
-        matched_blocks.append(row)
+        matched_blocks.append({"index": area_index, "text": display_row_text, "element": row})
 
         debug.log(f"[AREA KEYWORD]   → Area added to matched list (total: {len(matched_blocks)})")
 
@@ -2229,6 +2262,11 @@ async def nodriver_get_tixcraft_target_area(tab, el, config_dict, area_keyword_i
     if not matched_blocks:
         is_need_refresh = True
         matched_blocks = None
+
+    # Batch 7 hotfix: emit T_area_match_done so the user can see exactly how
+    # long the matching phase took (Python loop only — no CDP calls except
+    # the original batch evaluate).
+    log_timing("T_area_match_done", _timing_state, config_dict)
 
     return is_need_refresh, matched_blocks
 
