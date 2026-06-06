@@ -269,7 +269,7 @@ async def nodriver_kktix_travel_price_list(tab, config_dict, kktix_area_auto_sel
                 # Only filter permanently unavailable tickets (sold out)
 
                 # Multi-language "sold out" keyword filtering
-                sold_out_keywords = ['暫無票', '已售完', 'Sold Out', 'sold out', '完売']
+                sold_out_keywords = ['暫無票', '暫時無票', '已售完', 'Sold Out', 'sold out', '完売']
                 is_sold_out = any(kw in row_text for kw in sold_out_keywords)
 
                 if is_sold_out:
@@ -355,8 +355,9 @@ async def nodriver_kktix_travel_price_list(tab, config_dict, kktix_area_auto_sel
                     # No keyword specified, match all
                     is_match_area = True
                 else:
-                    # Check if all keywords match (AND logic)
-                    is_match_area = all(kw in row_text for kw in kktix_area_keyword_array)
+                    # Batch 9.1-B: strip commas so "5840" matches "$5,840" the way users expect.
+                    row_text_match = row_text.replace(',', '')
+                    is_match_area = all(kw.replace(',', '') in row_text_match for kw in kktix_area_keyword_array)
 
                 if debug.enabled:
                     original_text = util.remove_html_tags(result.get('html', '')) if result else ""
@@ -631,9 +632,8 @@ async def nodriver_kktix_reg_captcha(tab, config_dict, fail_list, registrationsN
                         debug.log(f"Captcha filling retry {retry_count}/{max_retries}")
 
                     try:
-                        # 人類化延遲：0.3-1秒隨機延遲
-                        human_delay = random.uniform(0.3, 1.0)
-                        await tab.sleep(human_delay)
+                        # Batch 9.1-C: respect 動作速度倍率 (advanced.action_speed_multiplier)
+                        await util.humanize_sleep(0.3, 1.0, config_dict)
 
                         # 填寫驗證碼答案
                         fill_result = await tab.evaluate(f'''
@@ -674,18 +674,16 @@ async def nodriver_kktix_reg_captcha(tab, config_dict, fail_list, registrationsN
                         if fill_result and fill_result.get('success'):
                             debug.log(f"Captcha answer filled successfully: {inferred_answer_string}")
 
-                            # 短暫延遲後點擊按鈕
-                            button_delay = random.uniform(0.5, 1.2)
-                            await tab.sleep(button_delay)
+                            # Batch 9.1-C: respect 動作速度倍率
+                            await util.humanize_sleep(0.5, 1.2, config_dict)
 
                             # 點擊下一步按鈕
                             button_click_success = await nodriver_kktix_press_next_button(tab, config_dict)
 
                             if button_click_success:
                                 success = True
-                                # 最終延遲
-                                final_delay = random.uniform(0.75, 1.5)
-                                await tab.sleep(final_delay)
+                                # Batch 9.1-C: respect 動作速度倍率
+                                await util.humanize_sleep(0.75, 1.5, config_dict)
 
                                 fail_list.append(inferred_answer_string)
                                 break
@@ -698,10 +696,9 @@ async def nodriver_kktix_reg_captcha(tab, config_dict, fail_list, registrationsN
                     except Exception as exc:
                         debug.log(f"Captcha retry {retry_count + 1} failed: {exc}")
 
-                    # 重試前的等待
+                    # Batch 9.1-C: respect 動作速度倍率
                     if not success and retry_count < max_retries - 1:
-                        retry_delay = random.uniform(0.8, 1.5)
-                        await tab.sleep(retry_delay)
+                        await util.humanize_sleep(0.8, 1.5, config_dict)
 
                 if not success:
                     debug.log("All captcha filling attempts failed")
