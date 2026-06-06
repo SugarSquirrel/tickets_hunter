@@ -1160,8 +1160,19 @@ async def nodriver_kktix_press_next_button(tab, config_dict=None):
                         return { success: false, error: 'No buttons found', buttonCount: 0 };
                     }
 
-                    // 點擊最後一個按鈕
-                    const targetButton = buttons[buttons.length - 1];
+                    // Batch 9.2: 若有「電腦配位 / 電腦選位」按鈕優先點，避免被「自行選位」誤點。
+                    // 找不到時退回「最後一個按鈕」這個既有預設行為。
+                    let targetButton = null;
+                    for (const btn of buttons) {
+                        const txt = (btn.innerText || btn.textContent || '');
+                        if (txt.includes('電腦配位') || txt.includes('電腦選位')) {
+                            targetButton = btn;
+                            break;
+                        }
+                    }
+                    if (!targetButton) {
+                        targetButton = buttons[buttons.length - 1];
+                    }
 
                     // 詳細檢查按鈕狀態
                     const buttonText = targetButton.innerText || targetButton.textContent || '';
