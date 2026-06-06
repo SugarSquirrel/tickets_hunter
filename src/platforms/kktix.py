@@ -177,26 +177,57 @@ async def nodriver_kktix_travel_price_list(tab, config_dict, kktix_area_auto_sel
     pending_tickets = None
     is_ticket_number_assigned = False
 
-    ticket_price_list = None
+    # Batch 9 (KKTIX speed-up): pull ALL row data in a single CDP round-trip.
+    # Previous flow:
+    #   1× query_selector_all('div.display-table-row') → N zendriver Elements
+    #   N× tab.evaluate(per-row) → text + html + input value/exists
+    # Total = N+1 CDP calls per scan. On a 10-ticket event that's ~500-1100ms.
+    # Now: 1× tab.evaluate batched returning JSON for every row at once.
+    # Element wrappers are never materialised — click site (line ~470) already
+    # uses JS `document.querySelectorAll(...)[idx]`, so we don't need them.
+    batch_data = None
     try:
-        # 舊版優先
-        ticket_price_list = await tab.query_selector_all('div.display-table-row')
-        # 若舊版找不到，使用新版選擇器
-        if not ticket_price_list or len(ticket_price_list) == 0:
-            ticket_price_list = await tab.query_selector_all('div.ticket-item')
+        batch_json = await tab.evaluate('''
+            (function() {
+                let rows = document.querySelectorAll('div.display-table-row');
+                if (rows.length === 0) {
+                    rows = document.querySelectorAll('div.ticket-item');
+                }
+                return JSON.stringify(Array.from(rows).map(function(row) {
+                    const input = row.querySelector('input');
+                    return {
+                        html: row.innerHTML,
+                        text: row.textContent || row.innerText || "",
+                        hasInput: !!input,
+                        inputValue: input ? input.value : "0"
+                    };
+                }));
+            })();
+        ''')
+        if batch_json:
+            import json as _json
+            try:
+                batch_data = _json.loads(batch_json) if isinstance(batch_json, str) else batch_json
+                if isinstance(batch_data, dict):
+                    # Some zendriver versions wrap return value
+                    batch_data = util.parse_nodriver_result(batch_data)
+                    if isinstance(batch_data, str):
+                        batch_data = _json.loads(batch_data)
+            except Exception:
+                batch_data = None
     except Exception as exc:
-        ticket_price_list = None
-        debug.log(f"[KKTIX] find ticket-price Exception: {exc}")
-        pass
+        debug.log(f"[KKTIX] Batch row scan failed: {exc}")
+        batch_data = None
 
     is_dom_ready = True
-    price_list_count = 0
-    if not ticket_price_list is None:
-        price_list_count = len(ticket_price_list)
-        debug.log("found price count:", price_list_count)
-    else:
+    if not isinstance(batch_data, list):
+        batch_data = []
         is_dom_ready = False
-        debug.log("[KKTIX] find ticket-price fail")
+        debug.log("[KKTIX] find ticket-price fail (batch returned no data)")
+
+    price_list_count = len(batch_data)
+    if price_list_count > 0:
+        debug.log("found price count:", price_list_count)
 
     if price_list_count > 0:
         areas = []
@@ -211,47 +242,26 @@ async def nodriver_kktix_travel_price_list(tab, config_dict, kktix_area_auto_sel
 
         debug.log(f'[KKTIX AREA] Keywords (AND logic): {kktix_area_keyword_array}')
 
-        for i, row in enumerate(ticket_price_list):
+        for i in range(price_list_count):
             row_text = ""
             row_html = ""
             row_input = None
             current_ticket_number = "0"
+            # Batch 9: read from pre-fetched batch_data instead of per-row CDP call.
             try:
-                # 使用 JavaScript 一次取得所有資料，避免使用元素物件方法
-                result = await tab.evaluate(f'''
-                    (function() {{
-                        // 舊版優先
-                        let rows = document.querySelectorAll('div.display-table-row');
-                        // 若舊版找不到，使用新版選擇器
-                        if (rows.length === 0) {{
-                            rows = document.querySelectorAll('div.ticket-item');
-                        }}
-                        if (rows[{i}]) {{
-                            const row = rows[{i}];
-                            const input = row.querySelector('input');
-                            return {{
-                                html: row.innerHTML,
-                                text: row.textContent || row.innerText || "",
-                                hasInput: !!input,
-                                inputValue: input ? input.value : "0"
-                            }};
-                        }}
-                        return {{ html: "", text: "", hasInput: false, inputValue: "0" }};
-                    }})();
-                ''')
-
-                # 使用統一解析函數處理返回值
-                result = util.parse_nodriver_result(result)
-                if result:
-                    row_html = result.get('html', '')
+                row_data = batch_data[i]
+                if isinstance(row_data, dict):
+                    row_html = row_data.get('html', '') or ''
                     row_text = util.remove_html_tags(row_html)
-                    current_ticket_number = result.get('inputValue', '0')
-                    if result.get('hasInput'):
-                        row_input = input_index  # 儲存有效 input 的索引
+                    current_ticket_number = row_data.get('inputValue', '0') or '0'
+                    if row_data.get('hasInput'):
+                        row_input = input_index
+                # Synthesise a `result` dict so the debug log line further down
+                # (`util.remove_html_tags(result.get('html', ''))`) keeps working.
+                result = row_data if isinstance(row_data, dict) else None
             except Exception as exc:
                 is_dom_ready = False
-                debug.log(f"Error in nodriver_kktix_travel_price_list: {exc}")
-                # error, exit loop
+                debug.log(f"Error in nodriver_kktix_travel_price_list (row {i}): {exc}")
                 break
 
             if len(row_text) > 0:
@@ -387,7 +397,7 @@ async def nodriver_kktix_travel_price_list(tab, config_dict, kktix_area_auto_sel
 
     # Match result summary
     if debug.enabled:
-        total_checked = len(ticket_price_list) if ticket_price_list else 0
+        total_checked = price_list_count
         total_matched_with_input = len(areas) if areas else 0
         total_matched_pending = len(pending_tickets) if pending_tickets else 0
         total_matched_all = total_matched_with_input + total_matched_pending
