@@ -3346,16 +3346,25 @@ async def nodriver_tixcraft_main(tab, url, config_dict, ocr, Captcha_Browser):
     # Handles alerts that appear after page navigation (e.g., area selection redirects)
     # Reference: KHAM platform implementation (Line 10681-10697)
     async def handle_global_alert(event):
-        # Skip alert handling when bot is paused (let user handle manually).
-        # IMPORTANT: When the grab is in flight (is_grabbing_critical) we
-        # MUST still dismiss the alert — otherwise a sold-out alert that
-        # arrives during a pause-keyword window leaves the dialog stranded
-        # on the page, which blocks all JS and locks the bot up until the
-        # user manually clicks OK.
-        if os.path.exists(CONST_MAXBOT_INT28_FILE) and not is_grabbing_critical():
-            return
-        # IMPORTANT: Use tab.target.url (cached) instead of nodriver_current_url (js_dumps)
-        # When alert dialog is open, JavaScript execution is blocked, causing js_dumps to hang
+        # Batch 8 hotfix (2-hour hang root cause): ALWAYS dismiss alerts,
+        # regardless of pause state. Previous behaviour skipped dismissal
+        # when the bot was paused (idle_keyword_second auto-pause OR manual
+        # UI pause) under the assumption that the user is at the keyboard
+        # and will handle the dialog. In practice this assumption is wrong
+        # for auto-pause: an idle_keyword_second pause fires every minute
+        # whether the user is present or not, and any sold-out alert that
+        # lands during the pause window stays on screen blocking all JS,
+        # which then hangs the bot's next js_dumps URL probe indefinitely.
+        # The bot stays hung even after the resume_keyword_second polling
+        # deletes the pause marker, because the main-loop coroutine is
+        # parked on the js_dumps await. We've seen this lock the bot for
+        # 2+ hours in user grabbing sessions. Auto-dismissing the alert
+        # avoids the JS block entirely and the bot pauses/resumes
+        # normally via the marker file.
+        #
+        # IMPORTANT: Use tab.target.url (cached) instead of nodriver_current_url
+        # (js_dumps) — when alert dialog is open, JavaScript execution is
+        # blocked and js_dumps would hang.
         current_url = tab.target.url if hasattr(tab, 'target') and tab.target else ""
 
         if '/ticket/checkout' in current_url:

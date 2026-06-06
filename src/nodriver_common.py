@@ -1449,13 +1449,28 @@ async def _nodriver_current_url_deep(tab):
 
     Kept as the slow path because js_dumps' failure modes are how we know
     the browser is gone. Called every _URL_DEEP_CHECK_INTERVAL iterations.
+
+    Batch 8 hotfix: wrap js_dumps in a 3s timeout. If a JS alert dialog
+    is open on the page, JS execution is blocked → js_dumps would hang
+    forever, parking the main-loop coroutine and effectively killing the
+    bot until the user manually dismisses the dialog (~2 hours observed
+    in user sessions). With the timeout, we fall back to cached URL via
+    Target.targetInfoChanged after 3s, so the main loop keeps ticking and
+    the global alert handler still gets a chance to dismiss the dialog.
     """
     is_quit_bot = False
     url = ""
     if tab:
         url_dict = {}
         try:
-            url_dict = await tab.js_dumps('window.location.href')
+            url_dict = await asyncio.wait_for(
+                tab.js_dumps('window.location.href'),
+                timeout=3.0,
+            )
+        except asyncio.TimeoutError:
+            # JS likely blocked by an open dialog. Stay alive — caller will
+            # fall back to the cached tab.target.url on the next tick.
+            url_dict = {}
         except Exception as exc:
             str_exc = ""
             try:
