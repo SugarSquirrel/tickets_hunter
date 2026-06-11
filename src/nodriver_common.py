@@ -802,6 +802,108 @@ TICKET_PREFILL_SCRIPT = r"""
 """
 
 
+KKTIX_PREFILL_SCRIPT = r"""
+(function() {
+  try {
+    if (location.hostname.indexOf('kktix.c') === -1) return;
+
+    var ticketNumber = parseInt(window.__TH_TICKET_NUMBER__ || 2);
+    var debugLog = !!window.__TH_PREFILL_DEBUG__;
+
+    function log(msg) {
+      if (debugLog) console.log('[TH-KKTIX-PREFILL]', msg);
+    }
+
+    function findTicketInputs() {
+      var sel = [
+        'div.ticket-item input.number-step-input-core',
+        'div.display-table-row input',
+        'input[ng-model="ticketModel.quantity"]',
+        'input[name^="tickets"]'
+      ];
+      for (var i = 0; i < sel.length; i++) {
+        var nodes = document.querySelectorAll(sel[i]);
+        if (nodes.length > 0) return nodes;
+      }
+      return [];
+    }
+
+    function angularApply(el) {
+      try {
+        el.dispatchEvent(new Event('input',  { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('blur',   { bubbles: true }));
+        if (window.angular) {
+          var scope = window.angular.element(el).scope();
+          if (scope) { scope.$apply(); }
+        }
+      } catch (e) {}
+    }
+
+    function tryFill() {
+      var container = document.getElementById('registrationsNewApp');
+      if (!container) return false;
+
+      var didSomething = false;
+
+      var agree = document.getElementById('person_agree_terms');
+      if (agree && !agree.checked) {
+        agree.checked = true;
+        angularApply(agree);
+        log('Checked person_agree_terms');
+        didSomething = true;
+      }
+
+      var inputs = findTicketInputs();
+      if (inputs.length === 1) {
+        var input = inputs[0];
+        if (!input.disabled && (input.value === '' || input.value === '0')) {
+          input.focus();
+          try { input.select(); } catch(e) {}
+          input.value = String(ticketNumber);
+          angularApply(input);
+          log('Filled single ticket input = ' + ticketNumber);
+          didSomething = true;
+        }
+        window.__TH_KKTIX_PREFILL_TICKET_DONE__ = true;
+      } else if (inputs.length > 1) {
+        window.__TH_KKTIX_PREFILL_TICKET_DONE__ = false;
+        log('Multiple ticket rows (' + inputs.length + '), leaving quantity to bot keyword logic');
+      }
+
+      window.__TH_KKTIX_PREFILL_AGREE_DONE__ = !!(agree && agree.checked);
+
+      return didSomething;
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', tryFill, { once: true });
+    } else {
+      tryFill();
+    }
+
+    if (!window.__TH_KKTIX_PREFILL_OBSERVING__) {
+      window.__TH_KKTIX_PREFILL_OBSERVING__ = true;
+      var obs = new MutationObserver(function() {
+        var agreeDone = window.__TH_KKTIX_PREFILL_AGREE_DONE__;
+        if (agreeDone && window.__TH_KKTIX_PREFILL_TICKET_DONE__ !== undefined) {
+          obs.disconnect();
+          return;
+        }
+        tryFill();
+      });
+      obs.observe(document.documentElement, { childList: true, subtree: true });
+      setTimeout(function() {
+        try { obs.disconnect(); } catch(e) {}
+      }, 8000);
+    }
+  } catch (err) {
+    console.error('[TH-KKTIX-PREFILL] Error:', err);
+  }
+})();
+"""
+
+
 async def register_prefill_script(tab, config_dict):
     """Register Batch 5.2 prefill script on the given tab.
 
@@ -833,6 +935,7 @@ async def register_prefill_script(tab, config_dict):
     try:
         await tab.send(cdp.page.add_script_to_evaluate_on_new_document(source=config_script))
         await tab.send(cdp.page.add_script_to_evaluate_on_new_document(source=TICKET_PREFILL_SCRIPT))
+        await tab.send(cdp.page.add_script_to_evaluate_on_new_document(source=KKTIX_PREFILL_SCRIPT))
         debug.log(f"[PREFILL] Registered: ticket_number={ticket_number}, allow_max_fallback={allow_max_fallback}")
     except Exception as exc:
         debug.log(f"[PREFILL] Failed to register (non-fatal): {exc}")

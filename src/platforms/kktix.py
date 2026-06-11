@@ -2019,8 +2019,21 @@ async def nodriver_kktix_main(tab, url, config_dict):
                 _state["fail_list"] = []
                 _state["played_sound_ticket"] = False
             else:
-                # 勾選同意條款 - 使用精確的 ID 選擇器
-                is_finish_checkbox_click = await nodriver_check_checkbox(tab, '#person_agree_terms:not(:checked)')
+                # Batch 10: prefill script 可能已勾好同意條款，先確認避免重複 CDP 往返
+                prefill_agree_done = False
+                if config_dict.get("advanced", {}).get("prefill_script_enable", True):
+                    try:
+                        prefill_agree_done = await tab.evaluate("!!window.__TH_KKTIX_PREFILL_AGREE_DONE__")
+                        prefill_agree_done = bool(util.parse_nodriver_result(prefill_agree_done))
+                    except Exception:
+                        prefill_agree_done = False
+
+                if prefill_agree_done:
+                    debug.log("[KKTIX PREFILL] Agreement already checked by prefill script, skipping")
+                    is_finish_checkbox_click = True
+                else:
+                    # 勾選同意條款 - 使用精確的 ID 選擇器
+                    is_finish_checkbox_click = await nodriver_check_checkbox(tab, '#person_agree_terms:not(:checked)')
 
                 # Check if tickets are already selected (prevent repeated execution)
                 is_ticket_already_selected = False
