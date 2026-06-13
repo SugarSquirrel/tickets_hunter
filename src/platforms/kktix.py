@@ -604,6 +604,7 @@ async def nodriver_kktix_reg_captcha(tab, config_dict, fail_list, registrationsN
             write_question_to_file(question_text)
 
             answer_list = util.get_answer_list_from_user_guess_string(config_dict, CONST_MAXBOT_ANSWER_ONLINE_FILE)
+            is_user_specified_answer = len(answer_list) > 0
             if len(answer_list)==0:
                 if config_dict["advanced"]["auto_guess_options"]:
                     answer_list = util.get_answer_list_from_question_string(None, question_text, config_dict)
@@ -685,7 +686,10 @@ async def nodriver_kktix_reg_captcha(tab, config_dict, fail_list, registrationsN
                                 # Batch 9.1-C: respect 動作速度倍率
                                 await util.humanize_sleep(0.75, 1.5, config_dict)
 
-                                fail_list.append(inferred_answer_string)
+                                # Batch 11 Bug 1: 使用者手動指定的答案不列黑名單（他已斷言答案就是這個），
+                                # 每輪都該重填。只有自動猜模式才黑名單（猜錯換下一個）。
+                                if not is_user_specified_answer:
+                                    fail_list.append(inferred_answer_string)
                                 break
                             else:
                                 debug.log("Button click failed, retrying...")
@@ -2019,21 +2023,10 @@ async def nodriver_kktix_main(tab, url, config_dict):
                 _state["fail_list"] = []
                 _state["played_sound_ticket"] = False
             else:
-                # Batch 10: prefill script 可能已勾好同意條款，先確認避免重複 CDP 往返
-                prefill_agree_done = False
-                if config_dict.get("advanced", {}).get("prefill_script_enable", True):
-                    try:
-                        prefill_agree_done = await tab.evaluate("!!window.__TH_KKTIX_PREFILL_AGREE_DONE__")
-                        prefill_agree_done = bool(util.parse_nodriver_result(prefill_agree_done))
-                    except Exception:
-                        prefill_agree_done = False
-
-                if prefill_agree_done:
-                    debug.log("[KKTIX PREFILL] Agreement already checked by prefill script, skipping")
-                    is_finish_checkbox_click = True
-                else:
-                    # 勾選同意條款 - 使用精確的 ID 選擇器
-                    is_finish_checkbox_click = await nodriver_check_checkbox(tab, '#person_agree_terms:not(:checked)')
+                # Batch 11 Bug 2: 還原 Batch 10 的 prefill-flag skip。該旗標 SPA 原地重渲染後會過期殘留，
+                # 害同意被重置卻不再勾。:not(:checked) 本身有勾即 no-op，廉價且安全，每輪都該跑。
+                # prefill 仍預勾（體感快路徑），但 bot 安全網必須每輪保證同意已勾。
+                is_finish_checkbox_click = await nodriver_check_checkbox(tab, '#person_agree_terms:not(:checked)')
 
                 # Check if tickets are already selected (prevent repeated execution)
                 is_ticket_already_selected = False
@@ -2076,7 +2069,17 @@ async def nodriver_kktix_main(tab, url, config_dict):
                             var agreeCheckbox = document.querySelector('#person_agree_terms');
                             var isAgreed = agreeCheckbox ? agreeCheckbox.checked : true;
 
-                            return hasTicket && hasMemberCode && isAgreed;
+                            // Batch 11 Bug 3: 若頁面有「問題型驗證碼」但答案未填，視為未完成，
+                            // 否則 bot 會誤判已完成而跳過 reg_new_main，永不填答案/按按鈕（卡死）。
+                            var captchaOk = true;
+                            var captchaContainer = document.querySelector('.custom-captcha');
+                            if (captchaContainer) {
+                                var captchaInput = document.querySelector('div.custom-captcha-inner input[name="captcha_answer"]')
+                                                || document.querySelector('div.custom-captcha-inner input');
+                                captchaOk = !!(captchaInput && captchaInput.value && captchaInput.value.trim() !== '');
+                            }
+
+                            return hasTicket && hasMemberCode && isAgreed && captchaOk;
                         })()
                     ''')
 
