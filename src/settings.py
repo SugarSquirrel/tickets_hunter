@@ -141,6 +141,10 @@ def get_default_config():
     config_dict["kktix"]["auto_press_next_step_button"] = True
     config_dict["kktix"]["auto_fill_ticket_number"] = True
     config_dict["kktix"]["max_dwell_time"] = 90
+    # Batch 12 軟跳轉（連續失敗 N 次 → 冷卻該優先序 C 秒 → 試下一個）
+    config_dict["kktix"]["soft_jump_enable"] = False
+    config_dict["kktix"]["soft_jump_fail_threshold"] = 3
+    config_dict["kktix"]["soft_jump_cooldown_seconds"] = 30
 
     config_dict['cityline']={}
 

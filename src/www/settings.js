@@ -71,6 +71,9 @@ const telegram_chat_id = document.querySelector('#telegram_chat_id');
 
 const auto_press_next_step_button = document.querySelector('#auto_press_next_step_button');
 const max_dwell_time = document.querySelector('#max_dwell_time');
+const kktix_soft_jump_enable = document.querySelector('#kktix_soft_jump_enable');
+const kktix_soft_jump_fail_threshold = document.querySelector('#kktix_soft_jump_fail_threshold');
+const kktix_soft_jump_cooldown_seconds = document.querySelector('#kktix_soft_jump_cooldown_seconds');
 
 const auto_reload_page_interval = document.querySelector('#auto_reload_page_interval');
 const action_speed_multiplier = document.querySelector('#action_speed_multiplier');
@@ -444,6 +447,15 @@ function load_settins_to_form(settings)
 
         auto_press_next_step_button.checked = settings.kktix.auto_press_next_step_button;
         max_dwell_time.value = settings.kktix.max_dwell_time;
+        if (kktix_soft_jump_enable) {
+            kktix_soft_jump_enable.checked = !!settings.kktix.soft_jump_enable;
+        }
+        if (kktix_soft_jump_fail_threshold) {
+            kktix_soft_jump_fail_threshold.value = settings.kktix.soft_jump_fail_threshold ?? 3;
+        }
+        if (kktix_soft_jump_cooldown_seconds) {
+            kktix_soft_jump_cooldown_seconds.value = settings.kktix.soft_jump_cooldown_seconds ?? 30;
+        }
 
         auto_reload_page_interval.value = settings.advanced.auto_reload_page_interval;
         if (action_speed_multiplier) {
@@ -779,6 +791,17 @@ function save_changes_to_dict(silent_flag)
 
             settings.kktix.auto_press_next_step_button = auto_press_next_step_button.checked;
             settings.kktix.max_dwell_time = parseInt(max_dwell_time.value);
+            if (kktix_soft_jump_enable) {
+                settings.kktix.soft_jump_enable = kktix_soft_jump_enable.checked;
+            }
+            if (kktix_soft_jump_fail_threshold) {
+                const _t = parseInt(kktix_soft_jump_fail_threshold.value, 10);
+                settings.kktix.soft_jump_fail_threshold = (Number.isFinite(_t) && _t >= 1 && _t <= 20) ? _t : 3;
+            }
+            if (kktix_soft_jump_cooldown_seconds) {
+                const _c = parseInt(kktix_soft_jump_cooldown_seconds.value, 10);
+                settings.kktix.soft_jump_cooldown_seconds = (Number.isFinite(_c) && _c >= 1 && _c <= 600) ? _c : 30;
+            }
 
             settings.advanced.auto_reload_page_interval = Number(auto_reload_page_interval.value);
             if (action_speed_multiplier) {

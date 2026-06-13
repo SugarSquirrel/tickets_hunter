@@ -1480,7 +1480,24 @@ async def nodriver_kktix_reg_new_main(tab, config_dict, fail_list, played_sound_
             # default refresh
             is_need_refresh_final = True
 
+            # Batch 12 軟跳轉：只在 2+ 優先序才啟用
+            soft_jump_on = (
+                config_dict.get("kktix", {}).get("soft_jump_enable", False)
+                and len(area_keyword_array) >= 2
+            )
+
             for area_keyword_item in area_keyword_array:
+                # Batch 12 軟跳轉：冷卻中的優先序跳過（改試下一個）
+                if soft_jump_on:
+                    cd_until = _state["soft_jump_cooldown_until"].get(area_keyword_item, 0)
+                    if cd_until > time.time():
+                        debug.log(f"[SOFT-JUMP] 優先序「{area_keyword_item}」冷卻中，跳過")
+                        continue
+                    elif cd_until > 0:
+                        # 冷卻到期，清除標記，回頭可選
+                        _state["soft_jump_cooldown_until"][area_keyword_item] = 0
+                        print(f"[SOFT-JUMP] 優先序「{area_keyword_item}」冷卻結束，恢復優先嘗試")
+
                 is_need_refresh_tmp = False
                 is_dom_ready, is_ticket_number_assigned, is_need_refresh_tmp = await nodriver_kktix_assign_ticket_number(tab, config_dict, area_keyword_item)
 
@@ -1493,6 +1510,8 @@ async def nodriver_kktix_reg_new_main(tab, config_dict, fail_list, played_sound_
                     is_need_refresh_final = False
 
                 if is_ticket_number_assigned:
+                    # Batch 12 軟跳轉：記錄這次送出的優先序，供 alert handler 累計失敗
+                    _state["soft_jump_last_submitted"] = area_keyword_item
                     break
                 else:
                     debug.log("is_need_refresh for keyword:", area_keyword_item)
@@ -1895,6 +1914,10 @@ async def nodriver_kktix_main(tab, url, config_dict):
             "guest_modal_checked": False,
             "printed_completed": False,
             "last_homepage_redirect_time": 0,
+            # Batch 12 軟跳轉狀態（per-priority）
+            "soft_jump_fail_count": {},        # {keyword_item: 連續失敗次數}
+            "soft_jump_cooldown_until": {},    # {keyword_item: 冷卻到期 timestamp}
+            "soft_jump_last_submitted": None,  # 最後一次送出的優先序 keyword_item
         })
 
     # Global alert handler - auto-dismiss KKTIX sold-out alerts
@@ -1926,6 +1949,19 @@ async def nodriver_kktix_main(tab, url, config_dict):
         if is_sold_out_alert:
             _state["alert_needs_reload"] = True
             debug.log("[KKTIX ALERT] Sold-out/error alert detected, flagging for reload")
+
+            # Batch 12 軟跳轉：累計「最後送出優先序」的連續失敗
+            if config_dict.get("kktix", {}).get("soft_jump_enable", False):
+                p = _state.get("soft_jump_last_submitted")
+                if p is not None:
+                    cnt = _state["soft_jump_fail_count"].get(p, 0) + 1
+                    _state["soft_jump_fail_count"][p] = cnt
+                    threshold = int(config_dict["kktix"].get("soft_jump_fail_threshold", 3))
+                    if cnt >= threshold:
+                        cooldown = int(config_dict["kktix"].get("soft_jump_cooldown_seconds", 30))
+                        _state["soft_jump_cooldown_until"][p] = time.time() + cooldown
+                        _state["soft_jump_fail_count"][p] = 0  # 重置，冷卻後重新計
+                        print(f"[SOFT-JUMP] 優先序「{p}」連續失敗 {cnt} 次，冷卻 {cooldown}s，改試次優先")
 
         for attempt in range(3):
             try:
@@ -2152,6 +2188,11 @@ async def nodriver_kktix_main(tab, url, config_dict):
 
         # 只在第一次偵測成功時執行動作
         if not _state["success_actions_done"]:
+            # Batch 12 軟跳轉：搶到票，清掉所有失敗計數與冷卻
+            _state["soft_jump_fail_count"] = {}
+            _state["soft_jump_cooldown_until"] = {}
+            _state["soft_jump_last_submitted"] = None
+
             if not _state["start_time"] is None:
                 if not _state["done_time"] is None:
                     bot_elapsed_time = _state["done_time"] - _state["start_time"]
