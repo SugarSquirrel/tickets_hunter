@@ -11,6 +11,7 @@ Dependency: util.py, settings.py, chrome_downloader.py (no platform imports)
 import asyncio
 import json
 import os
+import threading
 import time
 import traceback
 from collections import deque
@@ -1111,10 +1112,100 @@ def write_last_url_to_file(url):
 
 # ===== Notification =====
 
+# Batch 13: 持續鬧鈴狀態，一個 bot process 只觸發一次
+_persistent_alarm_state = {"active": False, "stop_event": None}
+
+
+def _persistent_alarm_loop(sound_filename, stop_event, max_seconds):
+    """迴圈播放音效直到 stop_event 被 set 或超過 max_seconds。"""
+    start = time.time()
+    while not stop_event.is_set() and (time.time() - start) < max_seconds:
+        try:
+            util.play_mp3(sound_filename)
+        except Exception:
+            # play_mp3 內部已有 fallback；再失敗就短暫等待避免忙迴圈
+            time.sleep(1.0)
+
+
+def _show_persistent_alarm_dialog(stop_event):
+    """置頂彈窗，「我知道了」按鈕 → set stop_event 停止鬧鈴。tkinter 缺席時靜默失敗。"""
+    try:
+        import tkinter as tk
+        root = tk.Tk()
+        root.title("搶到票了！")
+        root.attributes('-topmost', True)
+        root.geometry("420x220+300+300")
+
+        label = tk.Label(
+            root,
+            text="🎫 搶到票了！\n\n請盡快回到瀏覽器完成付款",
+            font=("Microsoft JhengHei", 16),
+            pady=20,
+        )
+        label.pack()
+
+        def on_dismiss():
+            stop_event.set()
+            try:
+                root.destroy()
+            except Exception:
+                pass
+
+        button = tk.Button(
+            root,
+            text="我知道了，關閉鬧鐘",
+            font=("Microsoft JhengHei", 13),
+            command=on_dismiss,
+            bg="#d9534f",
+            fg="white",
+            padx=20,
+            pady=10,
+        )
+        button.pack()
+
+        root.protocol("WM_DELETE_WINDOW", on_dismiss)
+        root.mainloop()
+    except Exception:
+        # tkinter 不可用（例如 headless server）→ 靜默略過；鈴聲仍會播到 max_seconds
+        pass
+
+
 def play_sound_while_ordering(config_dict):
     app_root = util.get_app_root()
     captcha_sound_filename = os.path.join(app_root, config_dict["advanced"]["play_sound"]["filename"].strip())
-    util.play_mp3_async(captcha_sound_filename)
+
+    # Batch 13：持續鬧鈴模式（預設關閉；開啟後鈴聲會 loop 到手動關掉或超過上限秒數）
+    persistent = config_dict["advanced"]["play_sound"].get("persistent_on_grab", False)
+
+    if not persistent:
+        util.play_mp3_async(captcha_sound_filename)
+        return
+
+    # 一個 process 只觸發一次，避免多路呼叫重疊
+    if _persistent_alarm_state["active"]:
+        return
+    _persistent_alarm_state["active"] = True
+
+    try:
+        max_seconds = int(config_dict["advanced"]["play_sound"].get("persistent_max_seconds", 300))
+    except (TypeError, ValueError):
+        max_seconds = 300
+    if max_seconds < 1:
+        max_seconds = 1
+
+    stop_event = threading.Event()
+    _persistent_alarm_state["stop_event"] = stop_event
+
+    threading.Thread(
+        target=_persistent_alarm_loop,
+        args=(captcha_sound_filename, stop_event, max_seconds),
+        daemon=True,
+    ).start()
+    threading.Thread(
+        target=_show_persistent_alarm_dialog,
+        args=(stop_event,),
+        daemon=True,
+    ).start()
 
 # Map platform name (lowercased) -> account key in config_dict["accounts"].
 # These platforms store a human-readable username/email.

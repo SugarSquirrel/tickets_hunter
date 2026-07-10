@@ -64,6 +64,8 @@ const keyword_exclude = document.querySelector('#keyword_exclude');
 const play_ticket_sound = document.querySelector('#play_ticket_sound');
 const play_order_sound = document.querySelector('#play_order_sound');
 const play_sound_filename = document.querySelector('#play_sound_filename');
+const play_sound_persistent_on_grab = document.querySelector('#play_sound_persistent_on_grab');
+const play_sound_persistent_max_seconds = document.querySelector('#play_sound_persistent_max_seconds');
 const discord_webhook_url = document.querySelector('#discord_webhook_url');
 const notification_message = document.querySelector('#notification_message');
 const telegram_bot_token = document.querySelector('#telegram_bot_token');
@@ -440,6 +442,12 @@ function load_settins_to_form(settings)
         play_ticket_sound.checked = settings.advanced.play_sound.ticket;
         play_order_sound.checked = settings.advanced.play_sound.order;
         play_sound_filename.value = settings.advanced.play_sound.filename;
+        if (play_sound_persistent_on_grab) {
+            play_sound_persistent_on_grab.checked = !!settings.advanced.play_sound.persistent_on_grab;
+        }
+        if (play_sound_persistent_max_seconds) {
+            play_sound_persistent_max_seconds.value = settings.advanced.play_sound.persistent_max_seconds ?? 300;
+        }
         discord_webhook_url.value = settings.advanced.discord_webhook_url || '';
         notification_message.value = settings.advanced.discord_message || settings.advanced.telegram_message || '';
         telegram_bot_token.value = settings.advanced.telegram_bot_token || '';
@@ -783,6 +791,13 @@ function save_changes_to_dict(silent_flag)
             settings.advanced.play_sound.ticket = play_ticket_sound.checked;
             settings.advanced.play_sound.order = play_order_sound.checked;
             settings.advanced.play_sound.filename = play_sound_filename.value;
+            if (play_sound_persistent_on_grab) {
+                settings.advanced.play_sound.persistent_on_grab = play_sound_persistent_on_grab.checked;
+            }
+            if (play_sound_persistent_max_seconds) {
+                const _s = parseInt(play_sound_persistent_max_seconds.value, 10);
+                settings.advanced.play_sound.persistent_max_seconds = (Number.isFinite(_s) && _s >= 1 && _s <= 3600) ? _s : 300;
+            }
             settings.advanced.discord_webhook_url = discord_webhook_url.value;
             settings.advanced.discord_message = notification_message.value;
             settings.advanced.telegram_bot_token = telegram_bot_token.value;

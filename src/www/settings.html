@@ -747,6 +747,26 @@
         </div>
 
         <div class="row mb-3">
+          <label class="col-sm-2 col-form-label form-check-label" for="play_sound_persistent_on_grab">└ 持續播放直到手動關閉</label>
+          <div class="col-sm-10 col-lg-8 col-xl-6">
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" id="play_sound_persistent_on_grab">
+              <label class="form-check-label" for="play_sound_persistent_on_grab">啟用</label>
+            </div>
+            <small class="form-text text-muted d-block mt-1">
+              用途：搶到票時如果你不在電腦前（例如睡著了），會<strong>迴圈鬧鈴 + 彈出置頂視窗</strong>把你叫醒，點視窗上的「我知道了」按鈕才會停。須先啟用上面「訂購時播放音效」。預設關閉。
+            </small>
+          </div>
+        </div>
+        <div class="row mb-3">
+          <label for="play_sound_persistent_max_seconds" class="col-sm-2 col-form-label">└ 鬧鈴最長秒數</label>
+          <div class="col-sm-10 col-lg-8 col-xl-6">
+            <input class="form-control" type="number" min="1" max="3600" id="play_sound_persistent_max_seconds" value="300" />
+            <small class="form-text text-muted d-block mt-1">安全上限：即使沒點關閉，鬧鈴超過這個秒數也會自動停止。預設 300 秒（5 分鐘）。</small>
+          </div>
+        </div>
+
+        <div class="row mb-3">
           <label for="play_sound_filename" class="col-sm-2 col-form-label">音效檔<span class="help-icon" data-help="play_sound_filename" title="音效檔說明" tabindex="0" role="button" aria-label="音效檔 說明"></span></label>
           <div class="col-sm-10 col-lg-8 col-xl-6">
             <input class="form-control" id="play_sound_filename" value="" />

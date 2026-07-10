@@ -196,6 +196,9 @@ def get_default_config():
     config_dict["advanced"]["play_sound"]["ticket"] = True
     config_dict["advanced"]["play_sound"]["order"] = True
     config_dict["advanced"]["play_sound"]["filename"] = CONST_CAPTCHA_SOUND_FILENAME_DEFAULT
+    # Batch 13 持續鬧鈴（搶到票時 loop 音效，防止使用者睡著錯過）
+    config_dict["advanced"]["play_sound"]["persistent_on_grab"] = False
+    config_dict["advanced"]["play_sound"]["persistent_max_seconds"] = 300
 
     config_dict["advanced"]["disable_adjacent_seat"] = False
     config_dict["advanced"]["hide_some_image"] = False
@@ -356,6 +359,10 @@ def migrate_config(config_dict):
     if "advanced" in config_dict and isinstance(config_dict["advanced"], dict):
         config_dict["advanced"].setdefault("show_timing_log", True)
         config_dict["advanced"].setdefault("ocr_retry_cooldown", 2.5)
+        # Batch 13 持續鬧鈴（play_sound 是巢狀 dict，通用 migrate loop 不會補；顯式 setdefault）
+        if isinstance(config_dict["advanced"].get("play_sound"), dict):
+            config_dict["advanced"]["play_sound"].setdefault("persistent_on_grab", False)
+            config_dict["advanced"]["play_sound"].setdefault("persistent_max_seconds", 300)
         # Bug 1.6-ⓘ: extended default from 15s to 180s for peak-load tolerance.
         # NOTE: setdefault won't overwrite existing 15.0 values from Batch 1.5 users —
         # they should manually bump it via the settings UI.
