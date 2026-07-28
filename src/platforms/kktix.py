@@ -1454,6 +1454,43 @@ async def nodriver_kktix_reg_new_main(tab, config_dict, fail_list, played_sound_
     auto_select_mode = config_dict["area_auto_select"]["mode"]
     area_auto_fallback = config_dict.get('area_auto_fallback', False)  # T021: Safe access for new field (default: strict mode)
 
+    # Batch 14: 資格限定票（如「信用卡優先購」）需先選資格 radio，否則 couldNextStep() 永遠 false
+    # → 下一步按鈕一直 disabled、bot 卡住。放在 reg_new_main 裡（不是 kktix_main）才能配合
+    # is_ticket_already_selected 的 qualOk 檢查：radio 未選時檢查回 False → reg_new_main 每輪被呼叫 →
+    # 迴圈選 radio 直到成功。每輪 idempotent：已選就跳過，未選則點第一個非 disabled 的。
+    try:
+        qual_click_result = await tab.evaluate('''
+            (function() {
+                var radios = document.querySelectorAll('input[type="radio"][ng-model*="use_qualification_id"]');
+                if (radios.length === 0) return "none";
+                for (var i = 0; i < radios.length; i++) {
+                    if (radios[i].checked) return "already";
+                }
+                for (var j = 0; j < radios.length; j++) {
+                    var r = radios[j];
+                    if (r.disabled) continue;
+                    r.checked = true;
+                    r.dispatchEvent(new Event('input', { bubbles: true }));
+                    r.dispatchEvent(new Event('change', { bubbles: true }));
+                    r.dispatchEvent(new Event('click', { bubbles: true }));
+                    if (window.angular) {
+                        try {
+                            var scope = window.angular.element(r).scope();
+                            if (scope) scope.$apply();
+                        } catch (e) {}
+                    }
+                    return "clicked:" + (r.value || "");
+                }
+                return "all-disabled";
+            })()
+        ''')
+        qual_click_result = util.parse_nodriver_result(qual_click_result) if qual_click_result is not None else None
+        if isinstance(qual_click_result, str) and qual_click_result.startswith("clicked"):
+            debug.log(f"[KKTIX QUAL] Auto-selected qualification radio ({qual_click_result})")
+            await asyncio.sleep(0.15)  # 給 Angular 一個 tick 更新 couldNextStep()
+    except Exception as exc:
+        debug.log(f"[KKTIX QUAL] radio auto-select failed (non-fatal): {exc}")
+
     # part 1: check div.
     registrationsNewApp_div = None
     try:
@@ -2115,7 +2152,17 @@ async def nodriver_kktix_main(tab, url, config_dict):
                                 captchaOk = !!(captchaInput && captchaInput.value && captchaInput.value.trim() !== '');
                             }
 
-                            return hasTicket && hasMemberCode && isAgreed && captchaOk;
+                            // Batch 14: 資格限定票（信用卡優先購等）若 radio 未選，button 永遠 disabled → 視為未完成
+                            var qualOk = true;
+                            var qualRadios = document.querySelectorAll('input[type="radio"][ng-model*="use_qualification_id"]');
+                            if (qualRadios.length > 0) {
+                                qualOk = false;
+                                for (var q = 0; q < qualRadios.length; q++) {
+                                    if (qualRadios[q].checked) { qualOk = true; break; }
+                                }
+                            }
+
+                            return hasTicket && hasMemberCode && isAgreed && captchaOk && qualOk;
                         })()
                     ''')
 
