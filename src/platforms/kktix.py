@@ -1955,6 +1955,8 @@ async def nodriver_kktix_main(tab, url, config_dict):
             "soft_jump_fail_count": {},        # {keyword_item: 連續失敗次數}
             "soft_jump_cooldown_until": {},    # {keyword_item: 冷卻到期 timestamp}
             "soft_jump_last_submitted": None,  # 最後一次送出的優先序 keyword_item
+            # Batch 14.1 重按「下一步」節流（查無空位時停留原頁需重按）
+            "retry_press_last_time": 0,
         })
 
     # Global alert handler - auto-dismiss KKTIX sold-out alerts
@@ -2192,6 +2194,20 @@ async def nodriver_kktix_main(tab, url, config_dict):
                     debug.log("[KKTIX] Executing ticket selection logic...")
                     _state["fail_list"], _state["played_sound_ticket"] = await nodriver_kktix_reg_new_main(tab, config_dict, _state["fail_list"], _state["played_sound_ticket"])
                     _state["done_time"] = time.time()
+                elif is_ticket_already_selected and '/registrations/new' in url:
+                    # Batch 14.1: 欄位全填好卻還停在報名頁 = 上一輪按了「下一步」但查無空位
+                    # （KKTIX「查詢空位中」→ 沒位 → 停在原頁、按鈕恢復可點），或上一輪沒按成。
+                    # 按鈕的 press 只在 reg_new_main 裡，而本分支代表 reg_new_main 被跳過 →
+                    # 沒人重按 → bot 乾等。此處補上重按；press_next_button 自帶
+                    # disabled/查詢空位中偵測，按鈕不可點時自動 no-op。
+                    if config_dict["kktix"].get("auto_press_next_step_button", True):
+                        now_ts = time.time()
+                        if now_ts - _state.get("retry_press_last_time", 0) >= 0.5:
+                            _state["retry_press_last_time"] = now_ts
+                            debug.log("[KKTIX RETRY PRESS] Fields ready but still on registration page, pressing next button again")
+                            press_ret = await nodriver_kktix_press_next_button(tab, config_dict)
+                            if press_ret:
+                                _state["done_time"] = time.time()
         else:
             is_event_page = False
             if '/events/' in url:
