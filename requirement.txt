@@ -1,4 +1,4 @@
-# Python Version: 3.11.9
+# Required Python Version: 3.10.x
 certifi==2026.1.4
 chardet==5.2.0
 cryptography==46.0.4
