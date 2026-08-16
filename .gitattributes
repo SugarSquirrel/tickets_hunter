@@ -1,0 +1,2 @@
+# Keep Windows batch files usable in GitHub archives and direct downloads.
+*.bat -text

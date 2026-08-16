@@ -1,4 +1,5 @@
 @echo off
+:: This file must use CRLF line endings for Windows CMD.
 chcp 65001 >nul
 setlocal EnableExtensions EnableDelayedExpansion
 
