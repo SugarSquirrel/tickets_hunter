@@ -75,11 +75,9 @@ AKASAKI 1st WORLD TOUR _ONIGIRI_ VIP PASS限量加購 登記抽選 - Ticket Plus
 TASK.md
 test1.md
 
-# 備份檔
+# 備份檔（通用樣式，不再逐一編號）
 *.bak
-*.bak-*
-*.bak2-*
-*.bak3-*
+*.bak*
 
 # Python cache
 __pycache__/
@@ -101,3 +99,6 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+
+
+點我初始化0807.bat

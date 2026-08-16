@@ -1079,6 +1079,16 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword):
         # json.dumps produces a valid JS string/array literal and escapes quotes and
         # backslashes. Interpolating raw user text used to break the whole script when a
         # keyword contained an apostrophe, which surfaced only as "selection failed".
+        # Ticket-type preference: pick the perk variant over the plain one when both exist.
+        ticket_type_raw = config_dict.get("advanced", {}).get("ticket_type_keyword", "")
+        ticket_type_terms = []
+        if isinstance(ticket_type_raw, str) and ticket_type_raw.strip():
+            for chunk in ticket_type_raw.replace(",", ";").split(";"):
+                cleaned = chunk.strip().strip('"').strip()
+                if cleaned:
+                    ticket_type_terms.append(cleaned)
+        ticket_type_terms_js = json.dumps(ticket_type_terms, ensure_ascii=True)
+
         area_keyword_js = json.dumps(area_keyword or "")
         auto_select_mode_js = json.dumps(auto_select_mode or "")
         exclude_keywords = json.dumps(exclude_keywords)
@@ -1094,6 +1104,9 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword):
                 const keywordTerms = keyword.split(/\\s+/)
                     .map(function (s) {{ return s.replace(/,/g, '').trim(); }})
                     .filter(function (s) {{ return s.length > 0; }});
+                // Preference list for choosing BETWEEN ticket rows inside the matched zone
+                // (e.g. plain ticket vs the "+ perk" variant). OR semantics, first hit wins.
+                const ticketTypeTerms = {ticket_type_terms_js};
                 const excludeKeywords = {exclude_keywords};
 
                 console.log('Unified selector execution - keyword:', keyword, 'tickets:', ticketNumber, 'mode:', autoSelectMode, 'fallback:', areaAutoFallback);
@@ -1145,9 +1158,8 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword):
 
                 // Reads the stepper's current value. TicketPlus renders it as a bare number
                 // inside .count-button; an <input> is used in some layouts.
-                function readCount(scope) {{
-                    if (!scope) return null;
-                    const box = scope.querySelector('.count-button') || scope;
+                function readCount(box) {{
+                    if (!box) return null;
                     const input = box.querySelector('input');
                     if (input && input.value !== undefined && input.value !== '') {{
                         const iv = parseInt(String(input.value).trim(), 10);
@@ -1179,16 +1191,65 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword):
                     return null;
                 }}
 
+                // A zone panel can hold SEVERAL ticket rows - e.g. "全票" and
+                // "全票+加購福利" - each with its own stepper. Taking the first
+                // .count-button therefore always bought the plain ticket and silently gave up the
+                // bundled perk, which on some events cannot be added afterwards.
+
+                // Largest ancestor that still contains exactly this one stepper == the ticket row.
+                // Derived from the DOM shape rather than class names, which vary between layouts.
+                function rowElementOf(box, panel) {{
+                    let el = box;
+                    while (el.parentElement && el.parentElement !== panel) {{
+                        const parent = el.parentElement;
+                        if (parent.querySelectorAll('.count-button').length > 1) break;
+                        el = parent;
+                    }}
+                    return el;
+                }}
+
+                function isRowSoldOut(text) {{
+                    return /售完|售罄|sold\\s*out/i.test(text);
+                }}
+
+                // Returns the stepper to drive, preferring a row that matches ticketTypeTerms.
+                function pickTicketBox(panel) {{
+                    const boxes = panel.querySelectorAll('.count-button');
+                    const candidates = [];
+                    for (let i = 0; i < boxes.length; i++) {{
+                        const box = boxes[i];
+                        if (!box.querySelector('.mdi-plus')) continue;   // sold out rows have no stepper
+                        const rowText = norm(rowElementOf(box, panel).textContent || '');
+                        if (isRowSoldOut(rowText)) continue;
+                        candidates.push({{ box: box, text: rowText }});
+                    }}
+                    if (!candidates.length) return null;
+                    if (ticketTypeTerms.length) {{
+                        for (let i = 0; i < candidates.length; i++) {{
+                            const c = candidates[i];
+                            const hit = ticketTypeTerms.some(function (t) {{ return c.text.indexOf(t) >= 0; }});
+                            if (hit) {{
+                                return {{ box: c.box, preferred: true, rowText: c.text.slice(0, 40),
+                                         rows: candidates.length }};
+                            }}
+                        }}
+                    }}
+                    return {{ box: candidates[0].box, preferred: false,
+                             rowText: candidates[0].text.slice(0, 40), rows: candidates.length }};
+                }}
+
                 // Clicking plus N times unconditionally is NOT idempotent: the main loop
                 // re-enters this selector every cycle while the page stays on /order/, so a
                 // failed submit used to leave 2N, 3N... tickets selected. Drive the stepper
                 // to the target instead, and no-op when it is already there.
                 function applyCount(scope, target) {{
-                    const box = scope.querySelector('.count-button') || scope;
+                    const picked = pickTicketBox(scope);
+                    if (!picked) return {{ ok: false, reason: 'no-plus' }};
+                    const box = picked.box;
                     const plus = box.querySelector('.mdi-plus');
                     const minus = box.querySelector('.mdi-minus');
                     if (!plus) return {{ ok: false, reason: 'no-plus' }};
-                    let before = readCount(scope);
+                    let before = readCount(box);
                     if (before === null) {{
                         // Never assume zero here. Assuming zero on an unreadable stepper
                         // re-adds `target` tickets on EVERY main-loop cycle, which is the
@@ -1203,18 +1264,22 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword):
                     }}
                     const current = before;
                     let delta = target - current;
+                    const meta = {{ rowText: picked.rowText, preferred: picked.preferred, rows: picked.rows }};
                     if (delta === 0) {{
-                        return {{ ok: true, before: before, clicks: 0, direction: 'none' }};
+                        return {{ ok: true, before: before, clicks: 0, direction: 'none',
+                                 rowText: meta.rowText, preferred: meta.preferred, rows: meta.rows }};
                     }}
                     let clicks = 0;
                     const budget = Math.min(Math.abs(delta), 20);
                     if (delta > 0) {{
                         for (let i = 0; i < budget; i++) {{ plus.click(); clicks++; }}
-                        return {{ ok: true, before: before, clicks: clicks, direction: 'up' }};
+                        return {{ ok: true, before: before, clicks: clicks, direction: 'up',
+                                 rowText: meta.rowText, preferred: meta.preferred, rows: meta.rows }};
                     }}
                     if (!minus) return {{ ok: false, reason: 'over-count-no-minus', before: before }};
                     for (let i = 0; i < budget; i++) {{ minus.click(); clicks++; }}
-                    return {{ ok: true, before: before, clicks: clicks, direction: 'down' }};
+                    return {{ ok: true, before: before, clicks: clicks, direction: 'down',
+                             rowText: meta.rowText, preferred: meta.preferred, rows: meta.rows }};
                 }}
 
                 function getTargetIndex(items, mode) {{
@@ -1297,7 +1362,9 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword):
                         if (applied.ok) {{
                             return {{ success: true, type: 'expansion_panel', selected: target.name,
                                      clicked: true, countBefore: applied.before,
-                                     countClicks: applied.clicks, countDirection: applied.direction }};
+                                     countClicks: applied.clicks, countDirection: applied.direction,
+                                     rowText: applied.rowText, rowPreferred: applied.preferred,
+                                     rowCount: applied.rows }};
                         }}
                         return {{ success: true, type: 'expansion_panel', selected: target.name,
                                  clicked: false, needRetry: true, applyReason: applied.reason }};
@@ -1384,9 +1451,48 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword):
                     retry_result = await tab.evaluate(f'''
                         (function() {{
                             const target = {ticket_number};
+                            const ticketTypeTerms = {ticket_type_terms_js};
 
-                            function readCount(scope) {{
-                                const box = scope.querySelector('.count-button') || scope;
+                            function normRow(s) {{
+                                return (s || '').replace(/,/g, '').replace(/\\s+/g, ' ').trim();
+                            }}
+
+                            // Mirror of the main pass: a zone can contain several ticket rows
+                            // (plain vs "+ perk"); pick the preferred one instead of the first.
+                            function rowElementOf(box, panel) {{
+                                let el = box;
+                                while (el.parentElement && el.parentElement !== panel) {{
+                                    const parent = el.parentElement;
+                                    if (parent.querySelectorAll('.count-button').length > 1) break;
+                                    el = parent;
+                                }}
+                                return el;
+                            }}
+
+                            function pickTicketBox(panel) {{
+                                const boxes = panel.querySelectorAll('.count-button');
+                                const candidates = [];
+                                for (let i = 0; i < boxes.length; i++) {{
+                                    const box = boxes[i];
+                                    if (!box.querySelector('.mdi-plus')) continue;
+                                    const rowText = normRow(rowElementOf(box, panel).textContent || '');
+                                    if (/售完|售罄|sold\\s*out/i.test(rowText)) continue;
+                                    candidates.push({{ box: box, text: rowText }});
+                                }}
+                                if (!candidates.length) return null;
+                                if (ticketTypeTerms.length) {{
+                                    for (let i = 0; i < candidates.length; i++) {{
+                                        const c = candidates[i];
+                                        if (ticketTypeTerms.some(function (t) {{ return c.text.indexOf(t) >= 0; }})) {{
+                                            return {{ box: c.box, preferred: true, rowText: c.text.slice(0, 40) }};
+                                        }}
+                                    }}
+                                }}
+                                return {{ box: candidates[0].box, preferred: false,
+                                         rowText: candidates[0].text.slice(0, 40) }};
+                            }}
+
+                            function readCount(box) {{
                                 const input = box.querySelector('input');
                                 if (input && input.value !== undefined && input.value !== '') {{
                                     const iv = parseInt(String(input.value).trim(), 10);
@@ -1421,11 +1527,13 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword):
                             // cannot stack extra tickets. An unreadable stepper is NOT
                             // assumed to be zero - see the main pass for why.
                             function applyCount(scope) {{
-                                const box = scope.querySelector('.count-button') || scope;
+                                const picked = pickTicketBox(scope);
+                                if (!picked) return null;
+                                const box = picked.box;
                                 const plus = box.querySelector('.mdi-plus');
                                 const minus = box.querySelector('.mdi-minus');
                                 if (!plus) return null;
-                                let before = readCount(scope);
+                                let before = readCount(box);
                                 if (before === null) {{
                                     if (vueTotalTicket() === 0) {{
                                         before = 0;
@@ -1487,6 +1595,13 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword):
                     selected_type = result.get('type', '')
                     selected_name = result.get('selected', '')
                     debug.log(f"Selection successful - type: {selected_type}, item: {selected_name}")
+                    row_text = result.get('rowText')
+                    if row_text:
+                        # Say which ticket row was taken. On events where a zone offers both a
+                        # plain and a "+ perk" variant, this is the line that proves the right
+                        # one was picked - the perk usually cannot be added after checkout.
+                        mark = "PREFERRED" if result.get('rowPreferred') else "first available"
+                        debug.log(f"[TICKET TYPE] Chose ({mark}) from {result.get('rowCount', '?')} row(s): {row_text}")
                 elif result.get('strict_mode'):
                     kw = result.get('attempted_keyword') or area_keyword
                     if result.get('keyword_in_sold_out'):

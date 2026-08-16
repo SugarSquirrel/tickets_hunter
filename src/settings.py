@@ -252,6 +252,7 @@ def get_default_config():
 
     config_dict["advanced"]["auto_reload_page_interval"] = 5
     config_dict["advanced"]["action_speed_multiplier"] = 1.0
+    config_dict["advanced"]["ticket_type_keyword"] = "福利"
     config_dict["advanced"]["tixcraft_soft_block_delay"] = ""
     config_dict["advanced"]["reset_browser_interval"] = 0
     config_dict["advanced"]["proxy_server_port"] = ""
@@ -535,6 +536,25 @@ def clean_tmp_file():
                     print(f"[CLEANUP] Removed orphan instance dir: {item}")
                 except Exception as e:
                     print(f"[WARNING] Failed to remove orphan instance dir {item}: {e}")
+
+def _test_notification_platform(config_dict):
+    """Best-effort platform name for the notification preview button."""
+    try:
+        homepage = (config_dict or {}).get("homepage", "") or ""
+    except Exception:
+        homepage = ""
+    known = {
+        "ticketplus": "TicketPlus", "tixcraft": "TixCraft", "kktix": "KKTIX",
+        "ibon": "iBon", "famiticket": "FamiTicket", "kham": "KHAM",
+        "cityline": "Cityline", "hkticketing": "HKTicketing",
+        "fansigo": "FANSI GO", "funone": "FunOne", "ticketmaster": "TicketMaster",
+    }
+    low = homepage.lower()
+    for key, label in known.items():
+        if key in low:
+            return label
+    return "Tickets Hunter"
+
 
 class NoCacheStaticFileHandler(StaticFileHandler):
     """Custom StaticFileHandler that prevents stale settings UI assets."""
@@ -864,6 +884,11 @@ class TestDiscordWebhookHandler(tornado.web.RequestHandler):
         debug = util.create_debug_logger(config_dict)
 
         custom_message = body.get("custom_message", "").strip()
+        # Run the same {placeholder} expansion the real notification uses, otherwise the
+        # test button previews raw "{datetime}" text and looks broken.
+        if custom_message:
+            custom_message = util.render_notification_template(
+                custom_message, "order", _test_notification_platform(config_dict))
         content = custom_message if custom_message else "[Test] Tickets Hunter webhook test successful!"
         payload = {
             "content": content,
@@ -920,6 +945,10 @@ class TestTelegramHandler(tornado.web.RequestHandler):
 
         url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
         custom_message = body.get("custom_message", "").strip()
+        # Same expansion as the Discord test path above.
+        if custom_message:
+            custom_message = util.render_notification_template(
+                custom_message, "order", _test_notification_platform(config_dict))
         text = custom_message if custom_message else "[Test] Tickets Hunter Telegram test successful!"
         errors = []
         ok_count = 0
