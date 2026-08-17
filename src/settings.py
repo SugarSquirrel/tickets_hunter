@@ -253,6 +253,7 @@ def get_default_config():
     config_dict["advanced"]["auto_reload_page_interval"] = 5
     config_dict["advanced"]["action_speed_multiplier"] = 1.0
     config_dict["advanced"]["ticket_type_keyword"] = "福利"
+    config_dict["advanced"]["allow_less_tickets"] = False
     config_dict["advanced"]["tixcraft_soft_block_delay"] = ""
     config_dict["advanced"]["reset_browser_interval"] = 0
     config_dict["advanced"]["proxy_server_port"] = ""

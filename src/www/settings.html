@@ -467,6 +467,17 @@
             <small class="form-text text-muted">同一個票區裡可能有多種票（例如「全票」與「全票+加購福利」）。填入後會<strong>優先</strong>選名稱含該關鍵字的票種；找不到才退而選第一種。多組用分號 <code>;</code> 分隔。留空 = 永遠選第一種。</small>
           </div>
         </div>
+
+        <div class="row mb-3">
+          <label class="col-sm-2 col-form-label">不足張數仍購買<span class="help-icon" data-help="allow_less_tickets" title="不足張數仍購買說明" tabindex="0" role="button" aria-label="不足張數仍購買 說明"></span></label>
+          <div class="col-sm-10 col-lg-8 col-xl-6">
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" id="allow_less_tickets">
+              <label class="form-check-label" for="allow_less_tickets">啟用</label>
+            </div>
+            <small class="form-text text-muted">關閉（預設）：票區剩餘張數<strong>少於</strong>你設定的張數時跳過不買，也不會因為加到一半卡住而送出短少的訂單。開啟：有幾張就買幾張。實名制、限購同一票區的活動建議維持關閉。</small>
+          </div>
+        </div>
         <div class="row mb-3">
           <label class="col-sm-2 col-form-label">區域自動遞補<span class="help-icon" data-help="area_auto_fallback" title="區域自動遞補說明" tabindex="0" role="button" aria-label="區域自動遞補 說明"></span></label>
           <div class="col-sm-10 col-lg-8 col-xl-6">

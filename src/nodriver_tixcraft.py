@@ -648,7 +648,7 @@ async def reload_config(config_dict, last_mtime, config_filepath):
                         "tixcraft_soft_block_delay",
                         "idle_keyword", "resume_keyword", "idle_keyword_second", "resume_keyword_second",
                         "discord_webhook_url", "telegram_bot_token", "telegram_chat_id",
-                        "discount_code", "ticket_type_keyword",
+                        "discount_code", "ticket_type_keyword", "allow_less_tickets",
                         "action_speed_multiplier", "discord_message", "telegram_message"
                     ]
                     for field in adv_fields:

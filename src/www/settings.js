@@ -17,6 +17,7 @@ const date_auto_fallback = document.querySelector('#date_auto_fallback');
 const area_select_mode = document.querySelector('#area_select_mode');
 const area_keyword = document.querySelector('#area_keyword');
 const ticket_type_keyword = document.querySelector('#ticket_type_keyword');
+const allow_less_tickets = document.querySelector('#allow_less_tickets');
 const area_auto_fallback = document.querySelector('#area_auto_fallback');
 const keyword_exclude = document.querySelector('#keyword_exclude');
 
@@ -1170,6 +1171,7 @@ function load_settins_to_form(settings)
         ticket_type_keyword.value = (settings.advanced.ticket_type_keyword === undefined ||
                                      settings.advanced.ticket_type_keyword === null)
             ? '' : settings.advanced.ticket_type_keyword;
+        allow_less_tickets.checked = settings.advanced.allow_less_tickets === true;
         area_auto_fallback.checked = settings.area_auto_fallback || false;
 
         keyword_exclude.value = format_keyword_for_display(settings.keyword_exclude);
@@ -1487,6 +1489,7 @@ function save_changes_to_dict(silent_flag)
             settings.area_auto_select.mode = area_select_mode.value;
             settings.area_auto_select.area_keyword = format_config_keyword_for_json(area_keyword.value);
         settings.advanced.ticket_type_keyword = ticket_type_keyword.value.trim();
+        settings.advanced.allow_less_tickets = allow_less_tickets.checked;
             settings.area_auto_fallback = area_auto_fallback.checked;
 
             settings.keyword_exclude = format_config_keyword_for_json(keyword_exclude.value);

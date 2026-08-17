@@ -69,6 +69,15 @@ CONST_TICKETPLUS_REPRESS_COOLDOWN_SEC = 3.0
 # the first request may still be in flight. (Reload guard, layer A.)
 CONST_TICKETPLUS_SUBMIT_GUARD_SEC = 3.0
 
+# Consecutive cycles the in-page refresh button may be missing before falling back to a
+# full page reload. The button is present even before the sale opens, so its absence is
+# far more likely to be a transient render than a broken page.
+CONST_TICKETPLUS_FLOAT_BTN_MISS_LIMIT = 3
+
+# How long the in-page wait for a lazily rendered stepper may run before handing back to
+# the Python retry path. It normally mounts in tens of milliseconds.
+CONST_TICKETPLUS_STEPPER_WAIT_MS = 800
+
 _state = {}
 
 
@@ -285,9 +294,8 @@ async def nodriver_ticketplus_account_sign_in(tab, config_dict):
         el_account = await tab.query_selector(my_css_selector)
         if el_account:
             await el_account.click()
-            await el_account.apply('function (element) {element.value = ""; } ')
-            await el_account.send_keys(ticketplus_account);
-            is_account_assigned = True
+            is_account_assigned = await _ticketplus_fill_and_verify(
+                el_account, ticketplus_account, "account", debug)
     except Exception as exc:
         debug.log(f"[TICKETPLUS SIGNIN] account input error: {exc}")
 
@@ -298,19 +306,28 @@ async def nodriver_ticketplus_account_sign_in(tab, config_dict):
             if el_password:
                 debug.log("[TICKETPLUS SIGNIN] Entering password...")
                 await el_password.click()
-                await el_password.apply('function (element) {element.value = ""; } ')
-                await el_password.send_keys(ticketplus_password);
+                is_filled_form = await _ticketplus_fill_and_verify(
+                    el_password, ticketplus_password, "password", debug)
+                if not is_filled_form:
+                    # Submitting a half-typed password just burns a login attempt.
+                    return is_filled_form, is_submited
                 await asyncio.sleep(util.scale_humanized_delay(0.1, 0.3, config_dict))
-                is_filled_form = True
 
                 if country_code=="+886":
                     # only this case to auto sumbmit.
                     debug.log("[TICKETPLUS SIGNIN] press enter")
                     await tab.send(cdp.input_.dispatch_key_event("keyDown", code="Enter", key="Enter", text="\r", windows_virtual_key_code=13))
                     await tab.send(cdp.input_.dispatch_key_event("keyUp", code="Enter", key="Enter", text="\r", windows_virtual_key_code=13))
-                    await asyncio.sleep(util.scale_humanized_delay(0.8, 1.2, config_dict))
-                    # PS: ticketplus country field may not located at your target country.
-                    is_submited = True
+                    # Wait for the password field to disappear instead of sleeping a flat ~1s:
+                    # on success this returns in a fraction of that, and on failure it says so
+                    # rather than reporting the submit as done.
+                    gone = await _ticketplus_wait_until(tab, "!document.querySelector('input[type=password]')", 3.0)
+                    if gone:
+                        debug.log("[TICKETPLUS SIGNIN] login form closed")
+                    else:
+                        debug.log("[TICKETPLUS SIGNIN] login form still open after 3s - submit may have failed")
+                    # PS: ticketplus country field may not be your target country.
+                    is_submited = gone
         except Exception as exc:
             debug.log(f"[TICKETPLUS SIGNIN] password input error: {exc}")
             pass
@@ -431,16 +448,67 @@ async def nodriver_ticketplus_account_auto_fill(tab, config_dict):
 
 
 async def _ticketplus_click_refresh_button(tab, debug):
-    """Click float-btn refresh button for partial DOM update; return True if clicked."""
+    """Click the in-page "update ticket count" button. Returns True if clicked.
+
+    This is an AJAX refresh: the SPA is never torn down, so the caller can skip the
+    "wait for Vue to mount" step afterwards - that check costs ~1s per cycle and here it
+    can only ever answer "ready", because Vue never went away.
+    """
     try:
         btn = await tab.query_selector('button.float-btn')
         if btn:
             await btn.click()
-            await asyncio.sleep(0.3)
+            # Just long enough for the XHR to return and Vue to patch the list.
+            await asyncio.sleep(0.15)
+            _state["spa_mounted"] = True
             debug.log("[REFRESH] Clicked update button (partial refresh)")
             return True
     except Exception:
         pass
+    return False
+
+
+async def _ticketplus_fill_and_verify(el, value, label, debug, attempts=3):
+    """Type into a field, then read it back and retype until it matches.
+
+    send_keys drops characters on framework-controlled inputs often enough to matter, and
+    the old code submitted whatever landed without ever looking. A half-typed account fails
+    the login for a reason nothing in the log would explain.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            await el.apply('function (element) { element.value = ""; }')
+            await el.send_keys(value)
+            actual = await el.apply('function (element) { return element.value; }')
+        except Exception as exc:
+            debug.log(f"[TICKETPLUS SIGNIN] {label} type error (attempt {attempt}): {exc}")
+            continue
+        if isinstance(actual, str) and actual == value:
+            if attempt > 1:
+                debug.log(f"[TICKETPLUS SIGNIN] {label} matched on attempt {attempt}")
+            return True
+        got = len(actual) if isinstance(actual, str) else '?'
+        debug.log(f"[TICKETPLUS SIGNIN] {label} mismatch (got {got} chars, want {len(value)}); retyping")
+    debug.log(f"[TICKETPLUS SIGNIN] {label} could not be entered correctly after {attempts} attempts")
+    return False
+
+
+async def _ticketplus_wait_until(tab, js_condition, timeout_sec, poll_sec=0.1):
+    """Poll an in-page boolean expression until true, or the deadline passes.
+
+    Replaces fixed sleeps that guess how long something takes: returns the moment the
+    condition holds (usually far sooner) and reports failure instead of assuming success.
+    """
+    deadline = time.time() + timeout_sec
+    expr = '(function(){ try { return !!(' + js_condition + '); } catch (e) { return false; } })()'
+    while time.time() < deadline:
+        try:
+            got = await asyncio.wait_for(tab.evaluate(expr), timeout=2.0)
+            if got is True or got == 'true':
+                return True
+        except Exception:
+            pass
+        await asyncio.sleep(poll_sec)
     return False
 
 
@@ -815,8 +883,20 @@ async def nodriver_ticketplus_date_auto_select(tab, config_dict):
                         event_id = current_url.split('/activity/')[-1].split('/')[0].split('?')[0]
                         order_url = 'https://ticketplus.com.tw/order/' + event_id + '/' + session_id
                         debug.log(f"[TicketPlus DATE] Vue data: date={target_session.get('date', '')} sessionId={session_id}")
+                        _state["spa_mounted"] = False
                         await tab.get(order_url)
-                        is_date_clicked = True
+                        # tab.get() can be answered with a 302 back to the event page, so
+                        # confirm where we actually ended up instead of assuming. Reporting a
+                        # navigation that did not happen sends the caller down the wrong branch.
+                        landed = await _ticketplus_wait_until(
+                            tab, "window.location.pathname.indexOf('/order/') === 0", 3.0)
+                        if landed:
+                            is_date_clicked = True
+                        else:
+                            debug.log(
+                                f"[TicketPlus DATE] Navigation did not land on /order/ "
+                                f"(now at {_ticketplus_current_url(tab)}); not marking as selected"
+                            )
 
         except Exception as exc:
             debug.log(f"[TicketPlus DATE] Vue data navigation failed: {exc}")
@@ -1089,6 +1169,12 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword):
                     ticket_type_terms.append(cleaned)
         ticket_type_terms_js = json.dumps(ticket_type_terms, ensure_ascii=True)
 
+        # "Buy anyway when stock is short" - off by default, because a short order is
+        # usually unfixable (per-order limits, non-transferable real-name tickets).
+        allow_less = bool(config_dict.get("advanced", {}).get("allow_less_tickets", False))
+        allow_less_js = 'true' if allow_less else 'false'
+        stepper_wait_ms = CONST_TICKETPLUS_STEPPER_WAIT_MS
+
         area_keyword_js = json.dumps(area_keyword or "")
         auto_select_mode_js = json.dumps(auto_select_mode or "")
         exclude_keywords = json.dumps(exclude_keywords)
@@ -1097,6 +1183,7 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword):
             (function() {{
                 const keyword = {area_keyword_js};
                 const ticketNumber = {ticket_number};
+                const allowLessTickets = {allow_less_js};
                 const autoSelectMode = {auto_select_mode_js};
                 const areaAutoFallback = {'true' if area_auto_fallback else 'false'};
                 // Every whitespace-separated term must match (AND). Normalised here once so
@@ -1145,6 +1232,26 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword):
                         }}
                     }}
                     return false;
+                }}
+
+                // Reads the "剩餘 N" figure the zone header shows when stock runs low.
+                // Returns null when no number is shown (e.g. "熱賣中"), meaning stock is
+                // above the site's display threshold - treated as plenty.
+                function readRemaining(text) {{
+                    const m = (text || '').match(/剩餘\\s*[:：]?\\s*(\\d+)/);
+                    if (!m) return null;
+                    const n = parseInt(m[1], 10);
+                    return isNaN(n) ? null : n;
+                }}
+
+                // Buying fewer tickets than asked for is usually worse than buying none: per-order
+                // limits mean the shortfall often cannot be topped up later, and on real-name
+                // events the seats cannot be transferred to fix it afterwards.
+                function hasEnoughStock(text) {{
+                    if (allowLessTickets) return true;
+                    const remain = readRemaining(text);
+                    if (remain === null) return true;
+                    return remain >= ticketNumber;
                 }}
 
                 function containsExcludeKeywords(name) {{
@@ -1273,8 +1380,23 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword):
                     const budget = Math.min(Math.abs(delta), 20);
                     if (delta > 0) {{
                         for (let i = 0; i < budget; i++) {{ plus.click(); clicks++; }}
+                        // The stepper silently caps at whatever stock is left, so "clicked N
+                        // times" does not mean "N tickets selected". Vue's data updates
+                        // synchronously on click (only the DOM patch is deferred), so the real
+                        // figure is readable right now.
+                        const actual = vueTotalTicket();
+                        if (!allowLessTickets && actual !== null && actual < target) {{
+                            // Undo, otherwise the leftover selection blocks other zones and can
+                            // still be submitted as a short order.
+                            if (minus) {{
+                                for (let i = 0; i < 20 && vueTotalTicket() > 0; i++) minus.click();
+                            }}
+                            return {{ ok: false, reason: 'insufficient-stock', got: actual,
+                                     want: target, rowText: meta.rowText }};
+                        }}
                         return {{ ok: true, before: before, clicks: clicks, direction: 'up',
-                                 rowText: meta.rowText, preferred: meta.preferred, rows: meta.rows }};
+                                 rowText: meta.rowText, preferred: meta.preferred, rows: meta.rows,
+                                 actual: actual }};
                     }}
                     if (!minus) return {{ ok: false, reason: 'over-count-no-minus', before: before }};
                     for (let i = 0; i < budget; i++) {{ minus.click(); clicks++; }}
@@ -1307,6 +1429,7 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword):
                     const panels = document.querySelectorAll('.seats-area .v-expansion-panel:not(:has(.seats-area))');
                     const validPanels = [];
                     const soldOutNames = [];
+                    const lowStockNames = [];
 
                     for (let i = 0; i < panels.length; i++) {{
                         const panel = panels[i];
@@ -1316,15 +1439,18 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword):
                             if (containsExcludeKeywords(name)) continue;
                             if (isSoldOut(panel)) {{
                                 soldOutNames.push(name);
+                            }} else if (!hasEnoughStock(name)) {{
+                                lowStockNames.push(name);
                             }} else {{
                                 validPanels.push({{ panel, name, index: i }});
                             }}
                         }}
                     }}
 
-                    console.log('Valid panels:', validPanels.length);
+                    console.log('Valid panels:', validPanels.length, 'low-stock skipped:', lowStockNames.length);
                     if (validPanels.length === 0) {{
-                        return {{ success: false, message: 'No valid panels' }};
+                        return {{ success: false, message: 'No valid panels',
+                                 lowStockSkipped: lowStockNames.slice(0, 6) }};
                     }}
 
                     let target = null;
@@ -1351,31 +1477,71 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword):
                         header.click();
                     }}
 
-                    // Vue renders the panel body lazily, so on a freshly expanded panel the
-                    // stepper does not exist yet in this same synchronous pass -> needRetry.
-                    let plusBtn = target.panel.querySelector('.mdi-plus') ||
-                                  target.panel.querySelector('.count-button .mdi-plus');
-
-                    if (plusBtn) {{
-                        const applied = applyCount(target.panel, ticketNumber);
-                        console.log('applyCount:', JSON.stringify(applied));
+                    function resultFor(applied) {{
                         if (applied.ok) {{
                             return {{ success: true, type: 'expansion_panel', selected: target.name,
                                      clicked: true, countBefore: applied.before,
                                      countClicks: applied.clicks, countDirection: applied.direction,
                                      rowText: applied.rowText, rowPreferred: applied.preferred,
-                                     rowCount: applied.rows }};
+                                     rowCount: applied.rows, waitedMs: applied.waitedMs }};
                         }}
                         return {{ success: true, type: 'expansion_panel', selected: target.name,
-                                 clicked: false, needRetry: true, applyReason: applied.reason }};
+                                 clicked: false, needRetry: true, applyReason: applied.reason,
+                                 got: applied.got, want: applied.want }};
                     }}
 
-                    return {{ success: true, type: 'expansion_panel', selected: target.name, clicked: false, needRetry: true }};
+                    // Vue renders the panel body lazily: on a freshly expanded panel the stepper
+                    // does not exist yet in this synchronous pass. Previously that always fell
+                    // through to a Python-side retry loop (0.3s sleep + up to 5 polls), which cost
+                    // roughly a second at the exact moment a returned ticket appears.
+                    // Wait for it here instead, driven by the DOM itself, and act the instant it
+                    // mounts. Requires await_promise=True on the caller.
+                    if (pickTicketBox(target.panel)) {{
+                        return resultFor(applyCount(target.panel, ticketNumber));
+                    }}
+
+                    return new Promise(function (resolve) {{
+                        const startedAt = Date.now();
+                        let settled = false;
+                        let observer = null;
+                        let timer = null;
+
+                        function finish(res) {{
+                            if (settled) return;
+                            settled = true;
+                            try {{ if (observer) observer.disconnect(); }} catch (e) {{}}
+                            if (timer) clearTimeout(timer);
+                            resolve(res);
+                        }}
+
+                        function attempt() {{
+                            if (settled) return true;
+                            if (!pickTicketBox(target.panel)) return false;
+                            const applied = applyCount(target.panel, ticketNumber);
+                            applied.waitedMs = Date.now() - startedAt;
+                            console.log('applyCount (after wait):', JSON.stringify(applied));
+                            finish(resultFor(applied));
+                            return true;
+                        }}
+
+                        timer = setTimeout(function () {{
+                            // Give up and let the existing Python retry path take over.
+                            finish({{ success: true, type: 'expansion_panel', selected: target.name,
+                                     clicked: false, needRetry: true, stepperTimedOut: true }});
+                        }}, {stepper_wait_ms});
+
+                        observer = new MutationObserver(function () {{ attempt(); }});
+                        observer.observe(target.panel, {{ childList: true, subtree: true }});
+
+                        // The stepper may have mounted between the expand click and this line.
+                        attempt();
+                    }});
 
                 }} else if (hasCountButton) {{
                     const rows = document.querySelectorAll('.row.py-1.py-md-4');
                     const validRows = [];
                     const soldOutRowNames = [];
+                    const lowStockRowNames = [];
 
                     for (let row of rows) {{
                         const plusBtn = row.querySelector('.count-button .mdi-plus');
@@ -1387,6 +1553,8 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword):
                             if (containsExcludeKeywords(name)) continue;
                             if (isSoldOut(row)) {{
                                 soldOutRowNames.push(name);
+                            }} else if (!hasEnoughStock(row.textContent || name)) {{
+                                lowStockRowNames.push(name);
                             }} else {{
                                 validRows.push({{ row, name, plusBtn }});
                             }}
@@ -1426,7 +1594,7 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword):
 
                 return {{ success: false, message: 'No selectable elements found' }};
             }})();
-        ''')
+        ''', await_promise=True)
 
         result = util.parse_nodriver_result(js_result)
 
@@ -1435,13 +1603,21 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword):
 
             if result.get('needRetry', False):
                 apply_reason = result.get('applyReason')
-                if apply_reason == 'unreadable-count':
+                if apply_reason == 'insufficient-stock':
+                    debug.log(
+                        f"[STOCK] Zone had fewer tickets than requested "
+                        f"(got {result.get('got')}, want {result.get('want')}); selection undone. "
+                        "Turn on 'allow_less_tickets' if a short order is acceptable."
+                    )
+                elif apply_reason == 'unreadable-count':
                     # Deliberate refusal, not a glitch: the stepper value could not be read
                     # and the component total says something is already selected, so
                     # clicking again could overshoot the per-order limit. Say so loudly -
                     # if this repeats every cycle the page markup has changed.
                     debug.log("[RETRY] Stepper value unreadable and tickets already selected; "
                               "refusing to click (would risk over-selecting). Retrying...")
+                elif result.get('stepperTimedOut'):
+                    debug.log("[RETRY] Stepper did not mount within the in-page wait; falling back to retry loop")
                 else:
                     debug.log("[RETRY] Panel expanded but plus button not found, retrying...")
 
@@ -1595,6 +1771,9 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword):
                     selected_type = result.get('type', '')
                     selected_name = result.get('selected', '')
                     debug.log(f"Selection successful - type: {selected_type}, item: {selected_name}")
+                    waited = result.get('waitedMs')
+                    if waited is not None:
+                        debug.log(f"[STEPPER] Mounted after {waited}ms (waited in-page, no retry round-trip)")
                     row_text = result.get('rowText')
                     if row_text:
                         # Say which ticket row was taken. On events where a zone offers both a
@@ -1610,6 +1789,9 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword):
                         debug.log(f"[STRICT] No purchasable area matches '{kw}'; strict mode keeps refreshing.")
                     debug.log("[STRICT] To auto-fallback to other available areas, enable: Advanced Settings -> area_auto_fallback")
                 else:
+                    low = result.get('lowStockSkipped')
+                    if low:
+                        debug.log(f"[STOCK] Skipped {len(low)} zone(s) with too few tickets: {low}")
                     debug.log(f"Selection failed: {result.get('message', 'unknown error')}")
         else:
             debug.log(f"Unified selector returned invalid result: {result}")
@@ -1658,7 +1840,10 @@ async def nodriver_ticketplus_click_next_button_unified(tab, config_dict):
     debug.log("Unified next button clicker started")
 
     try:
-        if await sleep_with_pause_check(tab, 0.6, config_dict):
+        # Discretionary pause before pressing - a real speed choice, unlike the render-waits
+        # elsewhere in this file, so it takes the global multiplier. The narrow range keeps
+        # the average at the previous fixed 0.6s.
+        if await sleep_with_pause_check(tab, util.scale_humanized_delay(0.5, 0.7, config_dict), config_dict):
             return False
 
         js_result = await asyncio.wait_for(tab.evaluate('''
@@ -1903,16 +2088,69 @@ async def nodriver_ticketplus_accept_realname_card(tab):
 
 
 async def nodriver_ticketplus_accept_other_activity(tab):
-    """Accept other activity popup."""
-    is_button_clicked = False
+    """Dismiss the secondary "other activity" dialog, and confirm it actually went away.
+
+    The old version reported success as soon as the click was issued. A click that lands on
+    an overlay, or on a button whose handler is not bound yet, left the dialog covering the
+    page while the caller believed it was gone - and every later click silently hit the
+    overlay instead of the page.
+
+    The selector was also a six-level strict-child chain; matching on the visible label
+    survives markup changes and is checked against a deny list so a "leave" style button is
+    never pressed.
+    """
     try:
-        button = await tab.query_selector('div[role="dialog"] > div.v-dialog > button.primary-1 > span > i.v-icon')
-        if button:
-            await button.click()
-            is_button_clicked = True
-    except Exception as exc:
-        pass
-    return is_button_clicked
+        result = await asyncio.wait_for(tab.evaluate("""
+            (function() {
+                var ACCEPT = ['確定', '我知道了', '知道了', '同意', 'OK', 'Ok'];
+                var DENY = ['回到首頁', '回首頁', '取消', '不同意', '離開'];
+                function visibleDialogs() {
+                    var out = [];
+                    var all = document.querySelectorAll('[role="dialog"], .v-dialog, .v-dialog__content');
+                    for (var i = 0; i < all.length; i++) {
+                        if (all[i].offsetParent !== null) out.push(all[i]);
+                    }
+                    return out;
+                }
+                var before = visibleDialogs();
+                if (!before.length) return JSON.stringify({ clicked: false, remaining: 0 });
+                for (var i = 0; i < before.length; i++) {
+                    var buttons = before[i].querySelectorAll('button');
+                    for (var j = 0; j < buttons.length; j++) {
+                        var btn = buttons[j];
+                        var txt = (btn.textContent || '').replace(/\\s+/g, '');
+                        if (!txt || btn.disabled) continue;
+                        if (DENY.some(function (d) { return txt.indexOf(d) >= 0; })) continue;
+                        if (!ACCEPT.some(function (a) { return txt.indexOf(a) >= 0; })) continue;
+                        btn.click();
+                        return JSON.stringify({ clicked: true, label: txt.slice(0, 20),
+                                                remaining: visibleDialogs().length });
+                    }
+                }
+                return JSON.stringify({ clicked: false, remaining: before.length });
+            })();
+        """), timeout=3.0)
+    except Exception:
+        return False
+
+    parsed = util.parse_nodriver_result(result)
+    if isinstance(parsed, str):
+        try:
+            parsed = json.loads(parsed)
+        except Exception:
+            return False
+    if not isinstance(parsed, dict) or not parsed.get('clicked'):
+        return False
+
+    # Vue tears the dialog down asynchronously, so confirm on the next tick rather than
+    # trusting the click.
+    closed = await _ticketplus_wait_until(
+        tab,
+        "!Array.prototype.some.call("
+        "document.querySelectorAll('[role=dialog], .v-dialog'), "
+        "function(d){ return d.offsetParent !== null; })",
+        1.5)
+    return bool(closed)
 
 
 async def nodriver_ticketplus_accept_order_fail(tab, debug=None):
@@ -2243,7 +2481,8 @@ async def nodriver_ticketplus_order(tab, config_dict, ocr, Captcha_Browser):
 
         is_answer_sent, _state["fail_list"], is_question_popup = await nodriver_ticketplus_order_exclusive_code(tab, config_dict, _state["fail_list"])
 
-        if await sleep_with_pause_check(tab, 0.3, config_dict):
+        # Same here: a discretionary settle-pause before submitting, average unchanged.
+        if await sleep_with_pause_check(tab, util.scale_humanized_delay(0.25, 0.35, config_dict), config_dict):
             debug.log("Paused before form submission")
             return
         await nodriver_ticketplus_ticket_agree(tab, config_dict)
@@ -2354,9 +2593,25 @@ async def nodriver_ticketplus_order(tab, config_dict, ocr, Captcha_Browser):
                 debug.log("[AUTO RELOAD] Refreshing ticket count...")
                 try:
                     clicked = await _ticketplus_click_refresh_button(tab, debug)
-                    if not clicked:
-                        await tab.reload()
-                        debug.log("[AUTO RELOAD] Full page reload (button not found)")
+                    if clicked:
+                        _state["float_btn_misses"] = 0
+                    else:
+                        # The in-page "update ticket count" button is an AJAX refresh: fast, and it
+                        # keeps page state. A full reload costs seconds, discards that state, and is
+                        # exactly the wrong move at the on-sale moment. Only escalate to F5 once the
+                        # button has been missing several cycles in a row.
+                        misses = _state.get("float_btn_misses", 0) + 1
+                        _state["float_btn_misses"] = misses
+                        if misses < CONST_TICKETPLUS_FLOAT_BTN_MISS_LIMIT:
+                            debug.log(
+                                f"[AUTO RELOAD] Update button not found ({misses}/"
+                                f"{CONST_TICKETPLUS_FLOAT_BTN_MISS_LIMIT}); waiting rather than reloading"
+                            )
+                        else:
+                            _state["float_btn_misses"] = 0
+                            _state["spa_mounted"] = False
+                            await tab.reload()
+                            debug.log("[AUTO RELOAD] Full page reload (update button missing repeatedly)")
                 except Exception as reload_exc:
                     debug.log(f"[AUTO RELOAD] Reload failed: {reload_exc}")
 
@@ -2587,6 +2842,8 @@ async def _nodriver_ticketplus_main_impl(tab, url, config_dict, ocr, Captcha_Bro
         _state["last_repress_at"] = 0
         _state["last_submit_at"] = 0
         _state["last_submit_url"] = ""
+        _state["float_btn_misses"] = 0
+        _state["spa_mounted"] = False
 
     home_url = 'https://ticketplus.com.tw/'
     is_user_signin = False
@@ -2658,12 +2915,18 @@ async def _nodriver_ticketplus_main_impl(tab, url, config_dict, ocr, Captcha_Bro
                 visit_type = "First visit" if is_first_visit else "Reload"
                 debug.log(f"[VUE INIT] {visit_type}, dynamic detection (max {max_wait}ms)...")
 
-            is_ready = await nodriver_ticketplus_wait_for_vue_ready(tab, max_wait_ms=max_wait)
-
-            debug.log(f"[VUE INIT] Vue.js ready: {is_ready}")
-
-            if not is_ready:
-                await asyncio.sleep(fallback_delay)
+            if _state.get("spa_mounted"):
+                # The last refresh was the in-page AJAX one, so Vue is still mounted and this
+                # check can only confirm what we already know. Measured at ~1s per cycle -
+                # roughly a third of the whole loop - for zero information.
+                debug.log("[VUE INIT] Skipped (partial refresh, SPA still mounted)")
+            else:
+                is_ready = await nodriver_ticketplus_wait_for_vue_ready(tab, max_wait_ms=max_wait)
+                debug.log(f"[VUE INIT] Vue.js ready: {is_ready}")
+                if is_ready:
+                    _state["spa_mounted"] = True
+                else:
+                    await asyncio.sleep(fallback_delay)
 
             is_button_pressed = await nodriver_ticketplus_accept_realname_card(tab)
             is_order_fail_handled = await nodriver_ticketplus_accept_order_fail(tab, debug)
@@ -2685,6 +2948,7 @@ async def _nodriver_ticketplus_main_impl(tab, url, config_dict, ocr, Captcha_Bro
                 else:
                     debug.log("[ORDER FAIL] Reloading page to refresh ticket availability")
                     try:
+                        _state["spa_mounted"] = False
                         await tab.reload()
                         await asyncio.sleep(0.5)
                     except Exception as reload_exc:
