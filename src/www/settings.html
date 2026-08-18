@@ -80,6 +80,25 @@
       background-image: none !important;
     }
 
+    /* Collapsible explanation headings: a soft blue that reads as a link without
+       competing with the field labels around it. */
+    .help-summary {
+      cursor: pointer;
+      color: #5b9bd5;
+    }
+
+    .help-summary:hover {
+      color: #4a8bc2;
+    }
+
+    [data-bs-theme="dark"] .help-summary {
+      color: #8ec5f0;
+    }
+
+    [data-bs-theme="dark"] .help-summary:hover {
+      color: #aad6f7;
+    }
+
     /* Dark mode - Remove invalid focus styling */
     [data-bs-theme="dark"] .form-control.is-invalid:focus,
     [data-bs-theme="dark"] .was-validated .form-control:invalid:focus,
@@ -836,6 +855,8 @@
             <small class="form-text text-muted">
               適用於所有平台的優惠代碼（優惠序號、加購序號、會員序號等）。目前支援：TicketPlus、KKTIX；亦作為 TixCraft 驗證題的最終 fallback（當「使用者自定字典」為空且「自動猜測驗證問題」未啟用時使用）。
             </small>
+            <details class="mt-2">
+              <summary class="help-summary">驗證欄位要填哪一個？</summary>
             <div class="alert alert-secondary mt-2 mb-0 py-2 px-3">
               <strong>驗證欄位要填哪一個？</strong>
               <div class="mt-1">TicketPlus 等平台的優先購，頁面上只會有<strong>一個</strong>驗證輸入框，但不同場次要求的東西不同。規則很簡單：</div>
@@ -846,6 +867,7 @@
               <div><strong>只填一個的時候，程式不看標籤</strong>——看到驗證框就直接把那個值填進去，不管網站寫「優先購序號」、「卡號前六碼」還是其他沒見過的寫法。</div>
               <div class="mt-1 text-muted">兩個都填的話，程式才會看欄位標籤決定：含「信用卡 / 簽帳金融卡 / 卡號 / 卡友」用前六碼；含「序號 / 加購 / 優惠」用本欄位；都認不出來則預設用本欄位。</div>
             </div>
+            </details>
           </div>
         </div>
 
@@ -879,6 +901,8 @@
               <div class="col-sm-10 col-lg-8 col-xl-6">
                 <input class="form-control" id="credit_card_prefix" value="" placeholder="例如：412345" maxlength="6" />
                 <div class="form-text">部分平台可能需要驗證信用卡前六碼（卡號最前面 6 位數字，不是完整卡號、也不是末三碼）。</div>
+                <details class="mt-2">
+                  <summary class="help-summary">信用卡前六碼：什麼時候要填？</summary>
                 <div class="alert alert-secondary mt-2 mb-0 py-2 px-3">
                   <strong>什麼時候要填？</strong>
                   <div class="mt-1">卡友優先購場次（例如銀行合作的優先購），頁面會要求輸入卡號前六碼驗證資格。這種場次就填在這裡，並將「進階設定 → 優惠代碼」<strong>留空</strong>。</div>
@@ -886,6 +910,7 @@
                   <div class="mt-1 text-muted">兩個欄位只填一個時，程式會直接把它填進頁面上的驗證框，不依賴欄位標籤的寫法。</div>
                   <div class="mt-1 text-danger">注意：本設定檔 settings.json 以<strong>明文</strong>儲存，分享檔案或截圖前請先避開。</div>
                 </div>
+                </details>
               </div>
             </div>
           </div>
@@ -1176,6 +1201,8 @@
             <input class="form-control mt-2" id="browser_profile_dir" value="" placeholder="瀏覽器資料夾（留空使用預設 login_profile）" />
             <div id="launch_browser_status" class="form-text"></div>
             <div id="login_profile_board" class="mt-2"></div>
+            <details class="mt-2">
+              <summary class="help-summary">接管瀏覽器：完整操作步驟</summary>
             <div class="alert alert-secondary mt-2 mb-0 py-2 px-3">
               <strong>用途：開搶前先自己登入好，程式直接接管那個視窗。</strong>
               <div class="mt-2"><strong>第一次使用（建立新的登入資料）</strong></div>
@@ -1201,6 +1228,7 @@
               <div class="mt-1 text-muted">只填資料夾、連接埠留空也可以：程式會自己開瀏覽器，但沜用那個資料夾，同樣不用重登（只是你不能在開搶前先操作頁面）。</div>
               <div class="mt-1 text-danger">注意：那個 Chrome 不能關掉——關了程式會在約 5 秒後自動停止這個實例。也不要在它裡面裝廣告攝截器，可能影響售票網站判定。</div>
             </div>
+            </details>
           </div>
         </div>
 

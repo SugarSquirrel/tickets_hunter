@@ -52,6 +52,7 @@ from platforms.tixcraft import *
 from platforms.ibon import *
 from platforms.kham import *
 from platforms.hkticketing import *
+from platforms.klook import *
 
 CONST_CITYLINE_SIGN_IN_URL = "https://www.cityline.com/Login.html?targetUrl=https%3A%2F%2Fwww.cityline.com%2FEvents.html"
 CONST_CITYLINE_HK_SIGN_IN_URL = "https://www.cityline.com.hk/Login.html?targetUrl=%s"
@@ -878,6 +879,10 @@ async def main(args):
         if is_maxbot_paused:
             if 'kktix.c' in url:
                 await nodriver_kktix_paused_main(tab, url, config_dict)
+            # Klook: nothing is clicked while paused, but the seat hold expires in about a
+            # minute, so say once that no one is going to press the confirm button.
+            if 'klook.com' in url:
+                await nodriver_klook_paused_main(tab, url, config_dict)
             # sleep more when paused.
             await asyncio.sleep(0.1)
             continue
@@ -966,6 +971,10 @@ async def main(args):
                     if not ticketplus_purchase_done:
                         print("[SUCCESS] TicketPlus on confirmation page, booking successful")
                         ticketplus_purchase_done = True
+
+        # https://www.klook.com/*/event-detail/*
+        if 'klook.com' in url:
+            await nodriver_klook_main(tab, url, config_dict, ocr, Captcha_Browser)
 
         if 'urbtix.hk' in url:
             #urbtix_main(driver, url, config_dict)
