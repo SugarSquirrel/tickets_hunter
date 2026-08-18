@@ -294,8 +294,13 @@ async def nodriver_ticketplus_account_sign_in(tab, config_dict):
         el_account = await tab.query_selector(my_css_selector)
         if el_account:
             await el_account.click()
-            is_account_assigned = await _ticketplus_fill_and_verify(
-                el_account, ticketplus_account, "account", debug)
+            # Read-back is a diagnostic, NOT a gate. The phone field reformats what you type
+            # (country code split, spacing), so a mismatch here does not mean the value is
+            # wrong - and gating on it skipped the whole password block, leaving the bot
+            # sitting on the login form with no password entered.
+            await _ticketplus_fill_and_verify(
+                el_account, ticketplus_account, "account", debug, required=False)
+            is_account_assigned = True
     except Exception as exc:
         debug.log(f"[TICKETPLUS SIGNIN] account input error: {exc}")
 
@@ -306,11 +311,9 @@ async def nodriver_ticketplus_account_sign_in(tab, config_dict):
             if el_password:
                 debug.log("[TICKETPLUS SIGNIN] Entering password...")
                 await el_password.click()
-                is_filled_form = await _ticketplus_fill_and_verify(
-                    el_password, ticketplus_password, "password", debug)
-                if not is_filled_form:
-                    # Submitting a half-typed password just burns a login attempt.
-                    return is_filled_form, is_submited
+                await _ticketplus_fill_and_verify(
+                    el_password, ticketplus_password, "password", debug, required=False)
+                is_filled_form = True
                 await asyncio.sleep(util.scale_humanized_delay(0.1, 0.3, config_dict))
 
                 if country_code=="+886":
@@ -468,12 +471,17 @@ async def _ticketplus_click_refresh_button(tab, debug):
     return False
 
 
-async def _ticketplus_fill_and_verify(el, value, label, debug, attempts=3):
-    """Type into a field, then read it back and retype until it matches.
+async def _ticketplus_fill_and_verify(el, value, label, debug, attempts=3, required=True):
+    """Type into a field, read it back, and retype while it does not match.
 
-    send_keys drops characters on framework-controlled inputs often enough to matter, and
-    the old code submitted whatever landed without ever looking. A half-typed account fails
-    the login for a reason nothing in the log would explain.
+    send_keys drops characters on framework-controlled inputs often enough to be worth
+    checking. But a mismatch does NOT reliably mean the value is wrong: TicketPlus
+    reformats the phone field as you type, so the read-back legitimately differs from the
+    string we sent.
+
+    With required=False (the login path) this is purely advisory - it retypes, logs what it
+    saw, and always reports success. Treating it as a gate once skipped the entire password
+    step and left the bot parked on the login form.
     """
     for attempt in range(1, attempts + 1):
         try:
@@ -489,8 +497,12 @@ async def _ticketplus_fill_and_verify(el, value, label, debug, attempts=3):
             return True
         got = len(actual) if isinstance(actual, str) else '?'
         debug.log(f"[TICKETPLUS SIGNIN] {label} mismatch (got {got} chars, want {len(value)}); retyping")
-    debug.log(f"[TICKETPLUS SIGNIN] {label} could not be entered correctly after {attempts} attempts")
-    return False
+    if required:
+        debug.log(f"[TICKETPLUS SIGNIN] {label} could not be entered correctly after {attempts} attempts")
+        return False
+    debug.log(f"[TICKETPLUS SIGNIN] {label} read-back never matched; proceeding anyway "
+              "(the field may reformat input - this is informational only)")
+    return True
 
 
 async def _ticketplus_wait_until(tab, js_condition, timeout_sec, poll_sec=0.1):
@@ -2732,20 +2744,35 @@ async def nodriver_ticketplus_order_exclusive_code(tab, config_dict, fail_list):
 
     discount_code = config_dict["advanced"].get("discount_code", "").strip()
 
-    if not discount_code:
-        debug.log("[DISCOUNT CODE] No discount code configured, skipping")
+    # Card-holder presales ask for the card BIN in the very same "exclusive code" box that a
+    # membership presale uses for a serial. Which one the page wants is only knowable from
+    # the field's own label, so both values are carried in and matched per field.
+    card_prefix = config_dict.get("contact", {}).get("credit_card_prefix", "").strip()
+
+    if not discount_code and not card_prefix:
+        debug.log("[DISCOUNT CODE] Neither serial nor credit card prefix configured, skipping")
         return False, fail_list, False
 
-    debug.log(f"[DISCOUNT CODE] Attempting to fill discount code: {discount_code}")
+    if discount_code:
+        debug.log(f"[DISCOUNT CODE] Serial available: {discount_code}")
+    if card_prefix:
+        debug.log(f"[DISCOUNT CODE] Card prefix available ({len(card_prefix)} digits)")
 
     try:
-        escaped_discount_code = discount_code.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n").replace("\r", "\\r")
+        code_js = json.dumps(discount_code)
+        card_js = json.dumps(card_prefix)
 
         result = await tab.evaluate(f'''
             (function() {{
-                const keywords = ['\u5e8f\u865f', '\u52a0\u8cfc', '\u512a\u60e0'];
-                const discountCode = '{escaped_discount_code}';
+                // Card fields are tested first: a card label can also contain the word used
+                // for discounts, and putting a serial into a card box wastes the attempt.
+                const cardKeywords = ['信用卡', '簽帳金融卡', '卡號', '卡友'];
+                const serialKeywords = ['序號', '加購', '優惠'];
+                const discountCode = {code_js};
+                const cardPrefix = {card_js};
                 let filledCount = 0;
+                const filled = [];
+                const skipped = [];
 
                 const labelDivs = document.querySelectorAll('.exclusive-code .label');
                 for (let label of labelDivs) {{
@@ -2754,19 +2781,38 @@ async def nodriver_ticketplus_order_exclusive_code(tab, config_dict, fail_list):
                     if (!container) continue;
 
                     const input = container.querySelector('.v-text-field__slot input[type="text"]');
+                    if (!input || input.value) continue;
 
-                    const hasKeyword = keywords.some(keyword => labelText.includes(keyword));
-                    if (hasKeyword && input && !input.value) {{
-                        input.value = discountCode;
-                        input.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                        input.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                        filledCount++;
+                    let value = null;
+                    let kind = null;
+                    if (cardKeywords.some(function (k) {{ return labelText.indexOf(k) >= 0; }})) {{
+                        kind = 'card';
+                        value = cardPrefix;
+                    }} else if (serialKeywords.some(function (k) {{ return labelText.indexOf(k) >= 0; }})) {{
+                        kind = 'serial';
+                        value = discountCode;
                     }}
+                    if (!kind) continue;
+
+                    if (!value) {{
+                        // The page wants something we hold no value for. Record which kind so
+                        // the log makes it obvious what is missing from settings.
+                        skipped.push({{ kind: kind, label: labelText.slice(0, 30) }});
+                        continue;
+                    }}
+
+                    input.value = value;
+                    input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    input.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    filledCount++;
+                    filled.push({{ kind: kind, label: labelText.slice(0, 30) }});
                 }}
 
                 return {{
                     success: filledCount > 0,
-                    filledCount: filledCount
+                    filledCount: filledCount,
+                    filled: filled,
+                    skipped: skipped
                 }};
             }})()
         ''')
@@ -2780,11 +2826,32 @@ async def nodriver_ticketplus_order_exclusive_code(tab, config_dict, fail_list):
                 success = True
                 filled_count = 1
 
+            filled = result.get('filled') or []
+            skipped = result.get('skipped') or []
+
+            for item in skipped:
+                if isinstance(item, dict):
+                    if item.get('kind') == 'card':
+                        debug.log(
+                            f"[DISCOUNT CODE] Page asks for a CARD number ('{item.get('label')}') "
+                            "but no credit card prefix is set. Fill it in Settings -> "
+                            "聯絡資訊 -> 信用卡前六碼."
+                        )
+                    else:
+                        debug.log(
+                            f"[DISCOUNT CODE] Page asks for a SERIAL ('{item.get('label')}') "
+                            "but no code is set. Fill it in Settings -> Advanced -> discount_code."
+                        )
+
             if success and filled_count > 0:
-                debug.log(f"[DISCOUNT CODE] Successfully filled {filled_count} discount code field(s)")
+                for item in filled:
+                    if isinstance(item, dict):
+                        what = "card prefix" if item.get('kind') == 'card' else "serial"
+                        debug.log(f"[DISCOUNT CODE] Filled {what} into '{item.get('label')}'")
+                debug.log(f"[DISCOUNT CODE] Successfully filled {filled_count} field(s)")
                 return True, fail_list, False
 
-        debug.log("[DISCOUNT CODE] No matching discount code fields found on page")
+        debug.log("[DISCOUNT CODE] No matching code fields found on page")
         return False, fail_list, False
 
     except Exception as e:
