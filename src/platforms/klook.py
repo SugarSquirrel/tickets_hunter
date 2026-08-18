@@ -53,6 +53,11 @@ CONST_KLOOK_SEAT_CONFIRM_DELAY_SEC = 45.0
 # loop period here is well under a second, and anything past this is a pause or a stall.
 CONST_KLOOK_SEAT_CYCLE_CAP_SEC = 10.0
 
+# When the hold countdown printed in the seat modal gets this low, the confirm
+# button is pressed no matter how long the decision window still had to run. The
+# window is worth having only while it cannot cost the seats.
+CONST_KLOOK_SEAT_SAFETY_SEC = 12
+
 _state = {}
 
 
@@ -194,26 +199,72 @@ CONST_KLOOK_JS_HELPERS = r'''
         return null;
     }
 
-    // The dialog Klook puts up once it has assigned seats: a visible modal carrying an
-    // enabled confirm button, and not the "time is up" one. Returns the button and the
-    // dialog text so the caller can decide separately whether to press it.
+    // The seat-assignment modal, located and read but never acted on here.
+    //
+    // Verified against the saved 電腦選位 page: the container carries
+    // seatModal_main-*, the header's right slot holds the hold countdown as mm:ss, and the
+    // two buttons are 自行選位 (outlined) and 確認 (primary). Only that one page had the
+    // modal, so the hash is not proven stable the way skuGroup- is - hence the text-based
+    // fallback, which insists the dialog actually mentions seats. Without that condition any
+    // confirm box on the page (cookies, login, a generic prompt) would qualify.
     function seatDialog() {
-        var modals = document.querySelectorAll('.klk-modal, [class*="modal"]');
-        for (var i = 0; i < modals.length; i++) {
-            var m = modals[i];
-            if (m.offsetParent === null) continue;
-            var body = (m.textContent || '');
-            if (body.indexOf('\u6642\u9593\u5230\u4e86') >= 0) continue;   // timeout dialog, not ours
-            var btns = m.querySelectorAll('button');
-            for (var j = 0; j < btns.length; j++) {
-                var b = btns[j];
-                var t = (b.textContent || '').replace(/\s+/g, '');
-                if (t.indexOf('\u78ba\u8a8d') < 0 && t.indexOf('\u78ba\u5b9a') < 0) continue;
-                if (b.disabled || (b.className || '').indexOf('klk-button-disabled') >= 0) continue;
-                return { btn: b, seats: body.replace(/\s+/g, ' ').slice(0, 120) };
+        var box = null;
+        var byClass = document.querySelector('[class*="seatModal_main-"]') ||
+                      document.querySelector('[class*="seatModal-"]');
+        if (byClass && byClass.offsetParent !== null) {
+            box = byClass;
+        } else {
+            var modals = document.querySelectorAll('.klk-modal, [class*="modal"]');
+            for (var i = 0; i < modals.length; i++) {
+                var m = modals[i];
+                if (m.offsetParent === null) continue;
+                var body = (m.textContent || '');
+                if (body.indexOf('\u6642\u9593\u5230\u4e86') >= 0) continue;   // timeout dialog
+                if (body.indexOf('\u5ea7\u4f4d') < 0 && body.indexOf('\u9078\u4f4d') < 0) continue;
+                box = m;
+                break;
             }
         }
-        return null;
+        if (!box) return null;
+
+        var btn = null;
+        var btns = box.querySelectorAll('button');
+        for (var j = 0; j < btns.length; j++) {
+            var b = btns[j];
+            var t = (b.textContent || '').replace(/\s+/g, '');
+            if (t.indexOf('\u78ba\u8a8d') < 0 && t.indexOf('\u78ba\u5b9a') < 0) continue;
+            if (t.indexOf('\u81ea\u884c\u9078\u4f4d') >= 0) continue;          // "pick my own seats"
+            if (b.disabled || (b.className || '').indexOf('klk-button-disabled') >= 0) continue;
+            btn = b;
+            break;
+        }
+        if (!btn) return null;
+
+        // How long Klook says the hold has left. Read from the header slot that holds
+        // nothing else; failing that, from the one element inside the modal whose entire
+        // text is mm:ss - matching loosely would pick up the showtime ("下午6:00") instead.
+        var remain = null;
+        var clock = box.querySelector('[class*="pc_header_right"]');
+        var raw = clock ? (clock.textContent || '').trim() : '';
+        if (!/^\d{1,2}:\d{2}$/.test(raw)) {
+            raw = '';
+            var all = box.querySelectorAll('*');
+            for (var k = 0; k < all.length; k++) {
+                var s = (all[k].textContent || '').trim();
+                if (/^\d{1,2}:\d{2}$/.test(s)) raw = s;
+            }
+        }
+        if (raw) {
+            var mm = raw.split(':');
+            remain = parseInt(mm[0], 10) * 60 + parseInt(mm[1], 10);
+        }
+
+        // The modal opens with a paragraph of zoom instructions; the part worth putting in
+        // a notification starts at the seat summary.
+        var full = (box.textContent || '').replace(/\s+/g, ' ');
+        var at = full.indexOf('已選');
+        if (at >= 0) full = full.slice(at);
+        return { btn: btn, remain: remain, seats: full.slice(0, 160) };
     }
 '''
 
@@ -413,17 +464,64 @@ async def nodriver_klook_select_options(tab, config_dict, debug):
             if ((el.className || '').indexOf('active') < 0) el.click();
             clicked.push(chosen[i].text);
         }
-        return JSON.stringify({ ok: true, matchedPriority: matchedIndex, clicked: clicked });
+
+        // Every group has to end up with something selected. Klook keeps the quantity step
+        // locked until they all are, so a keyword that pins down the ticket type but says
+        // nothing about, say, the package group leaves the run stuck on a greyed-out
+        // "next" with no explanation. Re-read the groups first: clicking one can re-render
+        // the others.
+        var after = groupElements();
+        var autofilled = [];
+        var unfilled = [];
+        for (var g = 0; g < after.length; g++) {
+            var sp = specsOf(after[g]);
+            var live = false;
+            for (var q = 0; q < sp.length; q++) {
+                if ((sp[q].className || '').indexOf('active') >= 0) live = true;
+            }
+            if (live) continue;
+            var headEl = after[g].querySelector('[class*="name-"]') || after[g].querySelector('.name');
+            var label = headEl ? textOf(headEl) : ('#' + g);
+            if (!cfg.allowFallback) { unfilled.push(label); continue; }
+            var filled = false;
+            for (var q2 = 0; q2 < sp.length; q2++) {
+                var c3 = sp[q2].className || '';
+                if (c3.indexOf('disabled') >= 0 || c3.indexOf('soldOut') >= 0) continue;
+                if (excluded(textOf(sp[q2]))) continue;
+                sp[q2].click();
+                autofilled.push(label + '=' + textOf(sp[q2]));
+                filled = true;
+                break;
+            }
+            if (!filled) unfilled.push(label);
+        }
+
+        return JSON.stringify({ ok: unfilled.length === 0, reason: unfilled.length ? 'incomplete' : '',
+                                matchedPriority: matchedIndex, clicked: clicked,
+                                autofilled: autofilled, unfilled: unfilled });
     ''')
 
     if result.get("ok"):
         idx = result.get("matchedPriority", -1)
         which = f"priority #{idx + 1}" if idx >= 0 else "fallback (no keyword matched)"
         debug.log(f"[KLOOK] Selected via {which}: {result.get('clicked')}")
+        auto = result.get("autofilled") or []
+        if auto:
+            # Worth shouting about: these were picked by the program, not by the keyword.
+            debug.log(f"[KLOOK] Groups the keyword did not cover, filled by fallback: {auto}")
+            print("[KLOOK] \u4e0b\u5217\u9078\u9805\u4e0d\u662f\u95dc\u9375\u5b57\u9078\u7684\uff0c"
+                  "\u662f\u905e\u88dc\u81ea\u52d5\u6311\u7684\uff1a" + str(auto))
         return True
 
     reason = result.get("reason") or result.get("error")
-    if reason == "no-keyword-match":
+    if reason == "incomplete":
+        debug.log(f"[KLOOK] These groups still have nothing selected: {result.get('unfilled')}. "
+                  "The next button stays disabled until every group is set.")
+        print("[KLOOK] \u9019\u5e7e\u7d44\u9078\u9805\u9084\u6c92\u9078\u5230\uff1a"
+              + str(result.get("unfilled"))
+              + "\u3002\u95dc\u9375\u5b57\u5fc5\u9808\u6bcf\u4e00\u7d44\u90fd\u8986\u84cb\u5230\uff0c"
+                "\u5426\u5247\u300c\u4e0b\u4e00\u6b65\u300d\u6703\u4e00\u76f4\u662f\u7070\u7684\u3002")
+    elif reason == "no-keyword-match":
         debug.log("[KLOOK] No option matched the area keyword; still refreshing. "
                   f"Selectable right now: {result.get('available')}")
     else:
@@ -538,24 +636,28 @@ def _accumulate_seat_wait(now):
 
 
 async def nodriver_klook_read_seat_dialog(tab):
-    """Is the seat-assignment dialog up? Looks only, never presses anything."""
+    """Is the seat modal up, and how long does Klook say the hold has left? Looks only."""
     return await _eval(tab, r'''
         var d = seatDialog();
-        return JSON.stringify(d ? { found: true, seats: d.seats } : { found: false });
+        return JSON.stringify(d ? { found: true, seats: d.seats, remain: d.remain }
+                                : { found: false });
     ''')
 
 
 async def nodriver_klook_confirm_seats(tab, config_dict, debug):
-    """Accept the seats Klook assigned, but not the instant they appear.
+    """Decide what to do about the assigned seats. Returns 'absent', 'waiting' or 'confirmed'.
 
-    Klook holds an assigned seat for roughly a minute. Pressing the confirm button the
-    moment the dialog opens spends that whole window on the bot's behalf, when the person
-    watching may want to see which seats came up and decide. So the dialog is left alone for
-    CONST_KLOOK_SEAT_CONFIRM_DELAY_SEC of running time, and only pressed if nothing has
-    happened by then - an unattended run still reaches the details form instead of letting
-    the hold quietly lapse.
+    The seats are held on a countdown Klook prints in the modal header. Confirming the
+    instant the modal opens spends that whole window on the bot's behalf, when the person
+    watching may want to see what they got and decide - so the dialog is left alone for
+    CONST_KLOOK_SEAT_CONFIRM_DELAY_SEC of running time first.
 
-    Pausing suppresses this entirely: the main loop stops dispatching here, so a paused bot
+    That wait never costs the seats: whenever the on-screen countdown drops to
+    CONST_KLOOK_SEAT_SAFETY_SEC the button is pressed regardless of how long the bot has
+    been waiting. So the 45 seconds are a decision window when the hold is generous and
+    quietly shrink when it is not, instead of being a fixed bet on how long Klook waits.
+
+    Pausing suppresses all of this: the main loop stops dispatching here, so a paused bot
     never confirms a seat. That is the point of pausing on this screen.
     """
     dialog = await nodriver_klook_read_seat_dialog(tab)
@@ -563,38 +665,46 @@ async def nodriver_klook_confirm_seats(tab, config_dict, debug):
         if _state.get("seat_seen_at") and not _state.get("seats_confirmed"):
             debug.log("[KLOOK] Seat dialog closed; countdown reset")
         _reset_seat_wait()
-        return False
+        return "absent"
 
     now = time.time()
     waited = _accumulate_seat_wait(now)
-    remaining = CONST_KLOOK_SEAT_CONFIRM_DELAY_SEC - waited
+    remain = dialog.get("remain")
+    countdown = f"{int(remain)}s left on the hold" if isinstance(remain, int) else "hold timer unreadable"
 
     if not _state.get("seat_announced"):
         _state["seat_announced"] = True
         seats = dialog.get("seats", "")
-        debug.log(f"[KLOOK] Seats assigned: {seats}")
+        debug.log(f"[KLOOK] Seats assigned ({countdown}): {seats}")
         print(f"[KLOOK] \u5df2\u5206\u914d\u5ea7\u4f4d\uff1a{seats}")
         print(f"[KLOOK] {int(CONST_KLOOK_SEAT_CONFIRM_DELAY_SEC)} "
               "\u79d2\u5167\u6c92\u6709\u52d5\u4f5c\u7684\u8a71\uff0c\u7a0b\u5f0f\u6703\u81ea\u52d5\u6309"
-              "\u300c\u78ba\u5b9a\u300d\u9032\u5165\u586b\u8cc7\u6599\u9801\uff1b"
+              "\u300c\u78ba\u8a8d\u300d\u9032\u5165\u586b\u8cc7\u6599\u9801\uff1b"
               "\u60f3\u81ea\u5df1\u6c7a\u5b9a\u8acb\u5148\u6309\u66ab\u505c\u3002")
         if config_dict.get("advanced", {}).get("play_sound", {}).get("ticket"):
             play_sound_while_ordering(config_dict)
         send_discord_notification(config_dict, "ticket", "Klook")
         send_telegram_notification(config_dict, "ticket", "Klook")
 
-    if remaining > 0:
+    deadline_reached = waited >= CONST_KLOOK_SEAT_CONFIRM_DELAY_SEC
+    hold_expiring = isinstance(remain, int) and remain <= CONST_KLOOK_SEAT_SAFETY_SEC
+    if not deadline_reached and not hold_expiring:
         if now - (_state.get("seat_notice_at") or 0) >= 10:
             _state["seat_notice_at"] = now
-            debug.log(f"[KLOOK] Seat dialog open, {remaining:.0f}s before auto-confirm")
-            print(f"[KLOOK] \u5ea7\u4f4d\u5c1a\u672a\u78ba\u5b9a\uff0c{int(remaining)} "
-                  "\u79d2\u5f8c\u81ea\u52d5\u6309\u78ba\u5b9a\u3002")
-        return False
+            left = CONST_KLOOK_SEAT_CONFIRM_DELAY_SEC - waited
+            debug.log(f"[KLOOK] Seat dialog open, {left:.0f}s before auto-confirm ({countdown})")
+            print(f"[KLOOK] \u5ea7\u4f4d\u5c1a\u672a\u78ba\u8a8d\uff0c{int(left)} "
+                  "\u79d2\u5f8c\u81ea\u52d5\u6309\u78ba\u8a8d\u3002")
+        return "waiting"
 
     # A click that did not take should be retried, but not hammered.
     if now - (_state.get("seat_click_at") or 0) < CONST_KLOOK_PRESS_GUARD_SEC:
-        return False
+        return "waiting"
     _state["seat_click_at"] = now
+
+    if hold_expiring and not deadline_reached:
+        debug.log(f"[KLOOK] Hold almost gone ({countdown}); confirming early")
+        print("[KLOOK] \u4fdd\u7559\u6642\u9593\u5feb\u5230\u4e86\uff0c\u63d0\u524d\u6309\u4e0b\u78ba\u8a8d\u3002")
 
     result = await _eval(tab, r'''
         var d = seatDialog();
@@ -603,10 +713,10 @@ async def nodriver_klook_confirm_seats(tab, config_dict, debug):
         return JSON.stringify({ ok: true, seats: d.seats });
     ''')
     if result.get("ok"):
-        debug.log(f"[KLOOK] Auto-confirmed after {waited:.0f}s: {result.get('seats')}")
-        print("[KLOOK] \u5df2\u81ea\u52d5\u6309\u4e0b\u78ba\u5b9a\uff0c\u9032\u5165\u586b\u5beb\u8cc7\u8a0a\u9801\u9762\u3002")
-        return True
-    return False
+        debug.log(f"[KLOOK] Confirmed after {waited:.0f}s of waiting: {result.get('seats')}")
+        print("[KLOOK] \u5df2\u6309\u4e0b\u78ba\u8a8d\uff0c\u9032\u5165\u586b\u5beb\u8cc7\u8a0a\u9801\u9762\u3002")
+        return "confirmed"
+    return "waiting"
 
 
 async def nodriver_klook_paused_main(tab, url, config_dict):
@@ -684,8 +794,13 @@ async def _nodriver_klook_main_impl(tab, url, config_dict, ocr, Captcha_Browser)
     # Seats already assigned? That dialog is the urgent one, so it is checked before
     # anything else on the page. It is not pressed straight away - see the function for the
     # countdown that leaves the decision to the user first.
-    if await nodriver_klook_confirm_seats(tab, config_dict, debug):
-        _state["seats_confirmed"] = True
+    seat_state = await nodriver_klook_confirm_seats(tab, config_dict, debug)
+    if seat_state != "absent":
+        # Whether it confirmed or is still giving the user their window, the modal owns the
+        # page now. Falling through would re-pick options and re-press "next" underneath an
+        # open seat dialog, on seats that are already held.
+        if seat_state == "confirmed":
+            _state["seats_confirmed"] = True
         return _get_status()
 
     state = await nodriver_klook_read_state(tab)
