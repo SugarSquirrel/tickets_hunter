@@ -18,6 +18,8 @@ const area_select_mode = document.querySelector('#area_select_mode');
 const area_keyword = document.querySelector('#area_keyword');
 const ticket_type_keyword = document.querySelector('#ticket_type_keyword');
 const allow_less_tickets = document.querySelector('#allow_less_tickets');
+const remote_debug_port = document.querySelector('#remote_debug_port');
+const browser_profile_dir = document.querySelector('#browser_profile_dir');
 const area_auto_fallback = document.querySelector('#area_auto_fallback');
 const keyword_exclude = document.querySelector('#keyword_exclude');
 
@@ -1172,6 +1174,8 @@ function load_settins_to_form(settings)
                                      settings.advanced.ticket_type_keyword === null)
             ? '' : settings.advanced.ticket_type_keyword;
         allow_less_tickets.checked = settings.advanced.allow_less_tickets === true;
+        remote_debug_port.value = settings.advanced.remote_debug_port || 0;
+        browser_profile_dir.value = settings.advanced.browser_profile_dir || '';
         area_auto_fallback.checked = settings.area_auto_fallback || false;
 
         keyword_exclude.value = format_keyword_for_display(settings.keyword_exclude);
@@ -1490,6 +1494,10 @@ function save_changes_to_dict(silent_flag)
             settings.area_auto_select.area_keyword = format_config_keyword_for_json(area_keyword.value);
         settings.advanced.ticket_type_keyword = ticket_type_keyword.value.trim();
         settings.advanced.allow_less_tickets = allow_less_tickets.checked;
+        let _port = parseInt(remote_debug_port.value, 10);
+        if (isNaN(_port) || _port < 0) { _port = 0; }
+        settings.advanced.remote_debug_port = _port;
+        settings.advanced.browser_profile_dir = browser_profile_dir.value.trim();
             settings.area_auto_fallback = area_auto_fallback.checked;
 
             settings.keyword_exclude = format_config_keyword_for_json(keyword_exclude.value);
@@ -2252,6 +2260,67 @@ if (homepage) {
     homepage.addEventListener('input', updateTixcraftRefreshWarning);
     homepage.addEventListener('change', updateTixcraftRefreshWarning);
 }
+function refreshLoginProfileBoard() {
+    const board = document.querySelector('#login_profile_board');
+    if (!board) { return; }
+    $.get('/login_profiles', function (res) {
+        if (!res || !res.success) { board.innerHTML = ''; return; }
+        if (!res.profiles.length) {
+            board.innerHTML = '<div class="form-text">目前沒有任何登入資料夾。在上方欄位打一個新名字，按「開啟登入用瀏覽器」就會建立。</div>';
+            return;
+        }
+        let html = '<div class="form-text mb-1">已存在的登入資料夾（點一下帶入欄位）：</div>';
+        res.profiles.forEach(function (p) {
+            const label = p.name + (p.size_mb ? ' · ' + p.size_mb + ' MB' : '');
+            html += '<button type="button" class="btn btn-sm btn-outline-secondary me-1 mb-1 login-profile-chip" data-name="'
+                 + p.name + '">' + label + '</button>';
+        });
+        board.innerHTML = html;
+        board.querySelectorAll('.login-profile-chip').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                const field = document.querySelector('#browser_profile_dir');
+                if (field) { field.value = btn.getAttribute('data-name'); }
+            });
+        });
+    });
+}
+
+const launch_browser_btn = document.querySelector('#launch_browser_btn');
+if (launch_browser_btn) {
+    refreshLoginProfileBoard();
+    launch_browser_btn.addEventListener('click', function () {
+        const status = document.querySelector('#launch_browser_status');
+        let port = parseInt(remote_debug_port.value, 10);
+        if (isNaN(port) || port < 1024 || port > 65535) {
+            // 0 means the feature is off, so launching would produce a browser the bot
+            // then ignores - say so instead of opening a window that does nothing.
+            status.textContent = '請先填一個 1024-65535 的連接埠（例如 9222）';
+            status.className = 'form-text text-danger';
+            return;
+        }
+        status.textContent = '啟動中...';
+        status.className = 'form-text';
+        $.ajax({
+            url: '/launch_browser',
+            type: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({ port: port, profile_dir: browser_profile_dir.value.trim() }),
+            success: function (res) {
+                status.textContent = res.message || (res.success ? 'OK' : 'failed');
+                status.className = 'form-text ' + (res.success ? 'text-success' : 'text-danger');
+                if (res.success && res.profile_dir) {
+                    browser_profile_dir.value = res.profile_dir;
+                }
+                refreshLoginProfileBoard();
+            },
+            error: function () {
+                status.textContent = '無法連線到設定伺服器';
+                status.className = 'form-text text-danger';
+            }
+        });
+    });
+}
+
 if (auto_reload_page_interval) {
     auto_reload_page_interval.addEventListener('input', updateTixcraftRefreshWarning);
     auto_reload_page_interval.addEventListener('change', updateTixcraftRefreshWarning);

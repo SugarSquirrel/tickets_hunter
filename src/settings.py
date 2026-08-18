@@ -8,6 +8,7 @@ import platform
 import re
 import shutil
 import subprocess
+import chrome_downloader
 import sys
 import threading
 import time
@@ -254,6 +255,8 @@ def get_default_config():
     config_dict["advanced"]["action_speed_multiplier"] = 1.0
     config_dict["advanced"]["ticket_type_keyword"] = "福利"
     config_dict["advanced"]["allow_less_tickets"] = False
+    config_dict["advanced"]["remote_debug_port"] = 0
+    config_dict["advanced"]["browser_profile_dir"] = ""
     config_dict["advanced"]["tixcraft_soft_block_delay"] = ""
     config_dict["advanced"]["reset_browser_interval"] = 0
     config_dict["advanced"]["proxy_server_port"] = ""
@@ -847,6 +850,106 @@ class SendkeyHandler(tornado.web.RequestHandler):
 
         self.write({"return": True})
 
+class LoginProfilesHandler(tornado.web.RequestHandler):
+    """List the browser profile folders that already hold a signed-in session."""
+
+    def get(self):
+        root = util.get_app_root()
+        found = []
+        try:
+            for name in sorted(os.listdir(root)):
+                path = os.path.join(root, name)
+                if not os.path.isdir(path):
+                    continue
+                # A Chrome profile always has a Default subfolder; this keeps unrelated
+                # directories out of the list.
+                if not os.path.isdir(os.path.join(path, "Default")):
+                    continue
+                size_mb = 0
+                try:
+                    for dirpath, _dirs, files in os.walk(path):
+                        for fname in files:
+                            try:
+                                size_mb += os.path.getsize(os.path.join(dirpath, fname))
+                            except OSError:
+                                pass
+                except Exception:
+                    pass
+                found.append({"name": name, "size_mb": round(size_mb / 1048576)})
+        except Exception as exc:
+            self.write({"success": False, "message": str(exc), "profiles": []})
+            return
+        self.write({"success": True, "profiles": found})
+
+
+class LaunchBrowserHandler(tornado.web.RequestHandler):
+    """Open a Chrome the user can sign in to, which the bot then takes over.
+
+    Starting the browser by hand means the sign-in is done and verified before the bot
+    touches anything - the state is visible rather than assumed. This endpoint only
+    removes the need to remember the command line; it launches Chrome with a debugging
+    port and a dedicated profile directory, nothing else.
+    """
+
+    def post(self):
+        try:
+            body = json.loads(self.request.body) if self.request.body else {}
+        except Exception:
+            body = {}
+
+        port = body.get("port")
+        try:
+            port = int(port)
+        except (TypeError, ValueError):
+            self.write({"success": False, "message": "連接埠必須是數字"})
+            return
+        if not (1024 <= port <= 65535):
+            self.write({"success": False, "message": "連接埠要在 1024-65535 之間"})
+            return
+
+        profile_dir = (body.get("profile_dir") or "").strip()
+        if not profile_dir:
+            profile_dir = os.path.join(util.get_app_root(), "login_profile")
+        try:
+            os.makedirs(profile_dir, exist_ok=True)
+        except Exception as exc:
+            self.write({"success": False, "message": f"無法建立資料夾: {exc}"})
+            return
+
+        webdriver_dir = os.path.join(util.get_app_root(), "webdriver")
+        try:
+            chrome_path = chrome_downloader.ensure_chrome_available(download_dir=webdriver_dir)
+        except Exception as exc:
+            chrome_path = None
+            print(f"[LAUNCH BROWSER] Chrome lookup failed: {exc}")
+        if not chrome_path:
+            self.write({"success": False, "message": "找不到 Chrome"})
+            return
+
+        # Fixed argument list: nothing here is taken from the request except the validated
+        # port and the profile directory.
+        cmd = [
+            chrome_path,
+            f"--remote-debugging-port={port}",
+            f"--user-data-dir={profile_dir}",
+            "--no-first-run",
+            "--no-default-browser-check",
+        ]
+        try:
+            subprocess.Popen(cmd, close_fds=True)
+        except Exception as exc:
+            self.write({"success": False, "message": f"啟動失敗: {exc}"})
+            return
+
+        print(f"[LAUNCH BROWSER] Chrome started on port {port}, profile: {profile_dir}")
+        self.write({
+            "success": True,
+            "port": port,
+            "profile_dir": profile_dir,
+            "message": "瀏覽器已開啟。請在那個視窗登入，回來按「存檔」，再按「啟動」。",
+        })
+
+
 class TestDiscordWebhookHandler(tornado.web.RequestHandler):
     ALLOWED_HOSTS = ("discord.com", "discordapp.com")
 
@@ -1083,6 +1186,8 @@ async def main_server():
         ("/reset", ResetJsonHandler),
         ("/profiles", ProfilesHandler),
 
+        ("/login_profiles", LoginProfilesHandler),
+        ("/launch_browser", LaunchBrowserHandler),
         ("/test_discord_webhook", TestDiscordWebhookHandler),
         ("/test_telegram", TestTelegramHandler),
         ("/ocr", OcrHandler),

@@ -8,6 +8,8 @@ No platform-specific logic should be placed here.
 
 Dependency: util.py, settings.py, chrome_downloader.py (no platform imports)
 """
+import socket
+import time
 import asyncio
 import json
 import os
@@ -478,7 +480,7 @@ CONST_URL_SILENT_ERROR_REPORT_THRESHOLD = 15
 CONST_URL_SILENT_ERROR_REPORT_INTERVAL = 50
 
 _url_error_state = {"silent_count": 0, "last_error": "", "last_reported": 0,
-                    "js_timeout_count": 0}
+                    "js_timeout_count": 0, "broken_since": 0}
 
 
 def classify_url_error(str_exc):
@@ -490,6 +492,25 @@ def classify_url_error(str_exc):
     is_silent = any(s in str_exc for s in CONST_URL_SILENT_ERROR_STRINGS)
     is_quit_bot = any(s in str_exc for s in CONST_URL_EXIT_ERROR_STRINGS)
     return is_silent, is_quit_bot
+
+
+# How long the browser connection may stay broken before the bot stops itself. The
+# upstream behaviour was to idle forever and let the user decide, but once the window is
+# gone there is nothing left to decide - the bot cannot read a page, cannot click, and just
+# holds its state files open. Time-based rather than a failure count, so a brief hiccup on a
+# 20-cycles-per-second loop does not trip it.
+CONST_BROWSER_LOST_QUIT_SECONDS = 5.0
+
+
+def note_url_error_started():
+    """Stamp the first failure of a run of failures. Returns seconds broken so far."""
+    if not _url_error_state.get("broken_since"):
+        _url_error_state["broken_since"] = time.time()
+    return time.time() - _url_error_state["broken_since"]
+
+
+def clear_url_error_started():
+    _url_error_state["broken_since"] = 0
 
 
 def get_url_error_count():
@@ -533,6 +554,7 @@ def record_url_silent_error(str_exc):
 
 def reset_url_error_state():
     """Clear the counter. Returns how many failures were pending (0 if none)."""
+    _url_error_state["broken_since"] = 0
     recovered = _url_error_state["silent_count"]
     _url_error_state["silent_count"] = 0
     _url_error_state["last_error"] = ""
@@ -587,8 +609,12 @@ async def nodriver_current_url(tab, config_dict=None):
                 count = get_url_error_count()
                 print(f"[URL ERROR] Browser connection lost: {count} consecutive "
                       f"websocket failures ({str_exc[:80]}).")
-                print("[URL ERROR] The bot cannot read the page URL and will keep "
-                      "idling. Please close the browser and restart the bot.")
+
+            broken_for = note_url_error_started()
+            if broken_for >= CONST_BROWSER_LOST_QUIT_SECONDS:
+                print(f"[URL ERROR] Browser has been unreachable for {broken_for:.0f}s "
+                      "(window closed?). Stopping this instance.")
+                is_quit_bot = True
 
         url_array = []
         if url_dict:
@@ -1049,6 +1075,15 @@ def get_nodriver_browser_args():
 
     return browser_args
 
+def _is_port_open(host, port, timeout=0.4):
+    """True when something is accepting connections on host:port."""
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
 def get_extension_config(config_dict, args=None):
     sandbox=True
     browser_args = get_nodriver_browser_args()
@@ -1060,6 +1095,26 @@ def get_extension_config(config_dict, args=None):
     mcp_connect_port = None
     if args and hasattr(args, 'mcp_connect') and args.mcp_connect:
         mcp_connect_port = args.mcp_connect
+    else:
+        # Same thing from settings, so the feature is reachable without remembering a
+        # command line. 0 (the default) means "start our own browser" as before.
+        try:
+            configured_port = int(config_dict.get("advanced", {}).get("remote_debug_port", 0) or 0)
+        except (TypeError, ValueError):
+            configured_port = 0
+        if 1024 <= configured_port <= 65535:
+            mcp_connect_port = configured_port
+
+    if mcp_connect_port:
+        # A port with nothing behind it is the likely case when someone fills the field but
+        # forgets to open the browser. Attaching would just hang on a door that is not
+        # there, so check first and fall through to starting our own browser instead.
+        if not _is_port_open("127.0.0.1", mcp_connect_port):
+            print(f"[TAKEOVER] Nothing is listening on port {mcp_connect_port}.")
+            print("[TAKEOVER] Open the browser first (Settings -> 接管已登入的瀏覽器 -> "
+                  "開啟登入用瀏覽器), or clear the port to let the bot open its own.")
+            print("[TAKEOVER] Starting a browser instead so this run is not wasted.")
+            mcp_connect_port = None
 
     if mcp_connect_port:
         # Connect to existing Chrome (NoDriver will NOT start a new browser)
@@ -1095,8 +1150,28 @@ def get_extension_config(config_dict, args=None):
         print("[ERROR] Please install Chrome manually or check your internet connection.")
         raise FileNotFoundError("Could not find or download Chrome browser")
 
-    # Normal mode: auto-detect (host=None, port=None) to let NoDriver start the browser
-    conf = Config(browser_args=browser_args, sandbox=sandbox, headless=config_dict["advanced"]["headless"], browser_executable_path=chrome_path)
+    # Normal mode: auto-detect (host=None, port=None) to let NoDriver start the browser.
+    #
+    # With no user_data_dir, zendriver creates a throwaway profile per run and deletes it on
+    # exit - which is why every launch starts logged out. Pointing at a directory keeps
+    # cookies between runs, so the sign-in only has to be done once.
+    profile_dir = config_dict.get("advanced", {}).get("browser_profile_dir", "")
+    profile_dir = profile_dir.strip() if isinstance(profile_dir, str) else ""
+
+    conf_kwargs = dict(browser_args=browser_args, sandbox=sandbox,
+                       headless=config_dict["advanced"]["headless"],
+                       browser_executable_path=chrome_path)
+    if profile_dir:
+        try:
+            os.makedirs(profile_dir, exist_ok=True)
+            conf_kwargs["user_data_dir"] = profile_dir
+            print(f"[PROFILE] Reusing browser profile: {profile_dir}")
+            print("[PROFILE] Chrome refuses to share a profile directory, so close any other "
+                  "Chrome window using it before starting.")
+        except Exception as exc:
+            print(f"[PROFILE] Could not use '{profile_dir}' ({exc}); falling back to a fresh profile")
+
+    conf = Config(**conf_kwargs)
     return conf
 
 def nodriver_overwrite_prefs(conf):
@@ -1137,9 +1212,30 @@ def nodriver_overwrite_prefs(conf):
     prefs_dict["sync"]={}
     prefs_dict["sync"]["autofill_wallet_import_enabled_migrated"]=False
 
-    json_str = json.dumps(prefs_dict)
-    with open(prefs_filepath, 'w') as outfile:
-        outfile.write(json_str)
+    # Merge rather than replace. On a throwaway profile the difference is invisible, but on a
+    # reused profile a straight overwrite discards everything Chrome has accumulated there on
+    # every launch. Only the keys set above are forced.
+    existing = {}
+    if os.path.exists(prefs_filepath):
+        try:
+            with open(prefs_filepath, 'r', encoding='utf-8') as infile:
+                loaded = json.load(infile)
+            if isinstance(loaded, dict):
+                existing = loaded
+        except Exception:
+            existing = {}
+
+    def deep_merge(base, overrides):
+        for key, value in overrides.items():
+            if isinstance(value, dict) and isinstance(base.get(key), dict):
+                deep_merge(base[key], value)
+            else:
+                base[key] = value
+        return base
+
+    merged = deep_merge(existing, prefs_dict)
+    with open(prefs_filepath, 'w', encoding='utf-8') as outfile:
+        outfile.write(json.dumps(merged))
 
     state_filepath = os.path.join(conf.user_data_dir,"Local State")
     state_dict = {}

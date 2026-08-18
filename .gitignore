@@ -23,6 +23,12 @@ src/webdriver/*/data/status.json
 # Browser data
 chrome_profile/
 user_data/
+# Sign-in profiles created by the browser-takeover feature: these hold live session
+# cookies for the ticketing accounts and must never be committed.
+/src/login_profile/
+/src/login_*/
+login_profile/
+
 
 # WebDriver executables
 /src/webdriver/*.exe
@@ -69,6 +75,7 @@ openspec/.vector-search.db*
 # ---
 optimization_by_yue/
 Ticket Plus遠大售票系統_sample/
+klook售票系統_sample/
 勾選框範例截圖.png
 AKASAKI 1st WORLD TOUR _ONIGIRI_ VIP PASS限量加購 登記抽選 - Ticket Plus遠大售票系統.html
 AKASAKI 1st WORLD TOUR _ONIGIRI_ VIP PASS限量加購 登記抽選 - Ticket Plus遠大售票系統_files/
@@ -102,7 +109,5 @@ Thumbs.db
 
 
 點我初始化0807.bat
-票區一覽 _ BIGBANG 2026-2027 WORLD TOUR _ XX：COSMOS _ IN TAIPEI（10_10場次） _ Ticket Plus遠大售票系統_files/
-票區一覽 _ BIGBANG 2026-2027 WORLD TOUR _ XX：COSMOS _ IN TAIPEI（10_10場次） _ Ticket Plus遠大售票系統.html
 區域關鍵字.md
-image.png
+ticketplus.com.tw.har

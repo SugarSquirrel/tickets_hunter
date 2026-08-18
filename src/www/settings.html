@@ -1166,6 +1166,45 @@
         </div>
 
         <div class="row mb-3">
+          <label for="remote_debug_port" class="col-sm-2 col-form-label">接管已登入的瀏覽器</label>
+          <div class="col-sm-10 col-lg-8 col-xl-6">
+            <div class="input-group">
+              <span class="input-group-text">連接埠</span>
+              <input class="form-control" id="remote_debug_port" type="number" min="0" max="65535" value="" placeholder="0（停用，每次開全新瀏覽器）" />
+              <button class="btn btn-outline-primary" type="button" id="launch_browser_btn">開啟登入用瀏覽器</button>
+            </div>
+            <input class="form-control mt-2" id="browser_profile_dir" value="" placeholder="瀏覽器資料夾（留空使用預設 login_profile）" />
+            <div id="launch_browser_status" class="form-text"></div>
+            <div id="login_profile_board" class="mt-2"></div>
+            <div class="alert alert-secondary mt-2 mb-0 py-2 px-3">
+              <strong>用途：開搶前先自己登入好，程式直接接管那個視窗。</strong>
+              <div class="mt-2"><strong>第一次使用（建立新的登入資料）</strong></div>
+              <ol class="mb-1 mt-1">
+                <li>「連接埠」填一個數字，例如 <code>9222</code></li>
+                <li>「瀏覽器資料夾」自己取一個名字，例如 <code>login_A</code>。<strong>打一個不存在的名字，就是新建一組登入資料</strong></li>
+                <li>按「開啟登入用瀏覽器」→ 在跳出來的 Chrome 登入售票網站</li>
+                <li>回來按「存檔」，再按「啟動」</li>
+              </ol>
+              <div class="mt-2"><strong>之後每次（沒有改帳號的話）</strong></div>
+              <ol class="mb-1 mt-1">
+                <li>連接埠、資料夾保持上次的值（存檔後會自動記住）</li>
+                <li>按「開啟登入用瀏覽器」——<strong>打開就是已登入狀態</strong>，不用重登</li>
+                <li>把頁面停在活動頁，<strong>開搶前重新整理一次</strong>（閒置太久會跳逾時彈窗）</li>
+                <li>按「啟動」</li>
+              </ol>
+              <div class="mt-2"><strong>多帳號（每個帳號一組）</strong></div>
+              <div class="mt-1">每個帳號要用<strong>不同的連接埠與不同的資料夾</strong>，例如：
+                <code>9222 / login_A</code>、<code>9223 / login_B</code>、<code>9224 / login_C</code>，並分別存成不同的設定檔。</div>
+              <div class="mt-2 text-muted"><strong>釐清兩件事：</strong>連接埠只是「門牌號碼」，關掉 Chrome 就消失；
+                <strong>讓你保持登入的是資料夾</strong>，它存在硬碟上不會不見。所以關掉瀏覽器不會損失登入。</div>
+              <div class="mt-1 text-muted">留空或填 <code>0</code> = 關閉此功能，每次都開全新的乾淨瀏覽器（預設行為）。</div>
+              <div class="mt-1 text-muted">只填資料夾、連接埠留空也可以：程式會自己開瀏覽器，但沜用那個資料夾，同樣不用重登（只是你不能在開搶前先操作頁面）。</div>
+              <div class="mt-1 text-danger">注意：那個 Chrome 不能關掉——關了程式會在約 5 秒後自動停止這個實例。也不要在它裡面裝廣告攝截器，可能影響售票網站判定。</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="row mb-3">
           <label for="idle_keyword" class="col-sm-2 col-form-label">系統時間 - <span class="text-danger">暫停</span>關鍵字<span class="help-icon" data-help="idle_keyword" title="系統時間暫停關鍵字說明" tabindex="0" role="button" aria-label="系統時間暫停關鍵字 說明"></span></label>
           <div class="col-sm-10 col-lg-8 col-xl-6">
             <input type="text" class="form-control" id="idle_keyword" placeholder="例如：09:30:00;14:15:30">
