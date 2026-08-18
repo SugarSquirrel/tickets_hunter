@@ -834,8 +834,18 @@
           <div class="col-sm-10 col-lg-8 col-xl-6">
             <input type="text" id="discount_code" value="" class="form-control" placeholder="優惠序號 / 加購序號 / 會員序號">
             <small class="form-text text-muted">
-              適用於所有平台的優惠代碼（優惠序號、加購序號、會員序號等），程式會自動偵測並填入所有符合的輸入欄位。目前支援：TicketPlus、KKTIX；亦作為 TixCraft 驗證題的最終 fallback（當「使用者自定字典」為空且「自動猜測驗證問題」未啟用時使用）。
+              適用於所有平台的優惠代碼（優惠序號、加購序號、會員序號等）。目前支援：TicketPlus、KKTIX；亦作為 TixCraft 驗證題的最終 fallback（當「使用者自定字典」為空且「自動猜測驗證問題」未啟用時使用）。
             </small>
+            <div class="alert alert-secondary mt-2 mb-0 py-2 px-3">
+              <strong>驗證欄位要填哪一個？</strong>
+              <div class="mt-1">TicketPlus 等平台的優先購，頁面上只會有<strong>一個</strong>驗證輸入框，但不同場次要求的東西不同。規則很簡單：</div>
+              <ul class="mb-1 mt-1">
+                <li><strong>這場要序號</strong>（會員優先購、加購序號…）→ 填在<strong>本欄位</strong>，「信用卡前六碼」留空</li>
+                <li><strong>這場要卡號</strong>（卡友優先購）→ 填在「聯絡資訊 → 信用卡前六碼」，<strong>本欄位留空</strong></li>
+              </ul>
+              <div><strong>只填一個的時候，程式不看標籤</strong>——看到驗證框就直接把那個值填進去，不管網站寫「優先購序號」、「卡號前六碼」還是其他沒見過的寫法。</div>
+              <div class="mt-1 text-muted">兩個都填的話，程式才會看欄位標籤決定：含「信用卡 / 簽帳金融卡 / 卡號 / 卡友」用前六碼；含「序號 / 加購 / 優惠」用本欄位；都認不出來則預設用本欄位。</div>
+            </div>
           </div>
         </div>
 
@@ -868,7 +878,14 @@
               <label for="credit_card_prefix" class="col-sm-2 col-form-label">信用卡前六碼</label>
               <div class="col-sm-10 col-lg-8 col-xl-6">
                 <input class="form-control" id="credit_card_prefix" value="" placeholder="例如：412345" maxlength="6" />
-                <div class="form-text">部分平台可能需要驗證信用卡前六碼</div>
+                <div class="form-text">部分平台可能需要驗證信用卡前六碼（卡號最前面 6 位數字，不是完整卡號、也不是末三碼）。</div>
+                <div class="alert alert-secondary mt-2 mb-0 py-2 px-3">
+                  <strong>什麼時候要填？</strong>
+                  <div class="mt-1">卡友優先購場次（例如銀行合作的優先購），頁面會要求輸入卡號前六碼驗證資格。這種場次就填在這裡，並將「進階設定 → 優惠代碼」<strong>留空</strong>。</div>
+                  <div class="mt-1">反之，如果這場要的是會員序號，就把這裡<strong>留空</strong>，改填「優惠代碼」。</div>
+                  <div class="mt-1 text-muted">兩個欄位只填一個時，程式會直接把它填進頁面上的驗證框，不依賴欄位標籤的寫法。</div>
+                  <div class="mt-1 text-danger">注意：本設定檔 settings.json 以<strong>明文</strong>儲存，分享檔案或截圖前請先避開。</div>
+                </div>
               </div>
             </div>
           </div>

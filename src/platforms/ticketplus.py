@@ -41,6 +41,7 @@ __all__ = [
     "nodriver_ticketplus_check_next_button",
     "nodriver_ticketplus_order_exclusive_code",
     "nodriver_ticketplus_read_queue_state",
+    "nodriver_ticketplus_watch_enqueue",
     "nodriver_ticketplus_read_next_step_state",
     "nodriver_ticketplus_main",
 ]
@@ -522,6 +523,82 @@ async def _ticketplus_wait_until(tab, js_condition, timeout_sec, poll_sec=0.1):
             pass
         await asyncio.sleep(poll_sec)
     return False
+
+
+CONST_TICKETPLUS_ENQUEUE_PATH = "/queue/api/v1/enqueue"
+
+
+async def nodriver_ticketplus_watch_enqueue(tab, config_dict):
+    """Log what the queue API actually answers, by reading the response already received.
+
+    DevTools cannot be relied on for this: it only keeps response bodies while the panel is
+    open and evicts them on navigation or buffer pressure - exactly when a ticket run is
+    interesting. Reading the body over CDP is passive; it inspects a response the browser
+    already fetched and never issues a request of its own to the ticketing server.
+
+    Registered once per tab. Safe to call repeatedly.
+    """
+    if _state.get("enqueue_watch_installed"):
+        return
+    debug = util.create_debug_logger(config_dict)
+
+    async def on_response(event):
+        try:
+            url = event.response.url
+        except Exception:
+            return
+        if CONST_TICKETPLUS_ENQUEUE_PATH not in url:
+            return
+        pending = _state.setdefault("enqueue_requests", {})
+        pending[str(event.request_id)] = url
+        # A run can last hours; only the newest few are ever needed.
+        if len(pending) > 50:
+            for stale in list(pending)[:-20]:
+                pending.pop(stale, None)
+
+    async def on_loading_finished(event):
+        request_id = getattr(event, "request_id", None)
+        if request_id is None:
+            return
+        if not _state.get("enqueue_requests", {}).pop(str(request_id), None):
+            return
+        try:
+            body, _is_b64 = await tab.send(cdp.network.get_response_body(request_id))
+        except Exception as exc:
+            debug.log(f"[ENQUEUE] Could not read response body: {exc}")
+            return
+        try:
+            data = json.loads(body)
+        except Exception:
+            debug.log(f"[ENQUEUE] Non-JSON response: {str(body)[:120]}")
+            return
+        if not isinstance(data, dict):
+            return
+
+        code = data.get("errCode")
+        parts = [f"errCode={code}"]
+        for key in ("errMsg", "waitSecond", "localCheck", "currentReservedOrderId", "errDetail"):
+            value = data.get(key)
+            if value not in (None, ""):
+                parts.append(f"{key}={value}")
+        line = "[ENQUEUE] " + " ".join(str(p) for p in parts)
+
+        # "00" is the success path; anything else is the reason an attempt never became an
+        # order - the single most useful fact after a failed run, so print it even with
+        # verbose off.
+        if code == "00":
+            debug.log(line)
+        else:
+            print(line)
+        _state["last_enqueue"] = {"errCode": code, "waitSecond": data.get("waitSecond")}
+
+    try:
+        tab.add_handler(cdp.network.ResponseReceived, on_response)
+        tab.add_handler(cdp.network.LoadingFinished, on_loading_finished)
+        _state["enqueue_watch_installed"] = True
+        debug.log("[ENQUEUE] Watching queue API responses")
+    except Exception as exc:
+        debug.log(f"[ENQUEUE] Could not install watcher: {exc}")
 
 
 async def nodriver_ticketplus_read_queue_state(tab):
@@ -2764,48 +2841,84 @@ async def nodriver_ticketplus_order_exclusive_code(tab, config_dict, fail_list):
 
         result = await tab.evaluate(f'''
             (function() {{
-                // Card fields are tested first: a card label can also contain the word used
-                // for discounts, and putting a serial into a card box wastes the attempt.
+                // Strategy: structure first, labels only to break ties.
+                //
+                // Every presale so far renders exactly one box inside .exclusive-code, and the
+                // API posts whatever is typed there as `serialNumber` regardless of whether the
+                // page called it a member code or a card BIN. So when there is one box and one
+                // configured value, matching the wording is pointless - and fragile, because a
+                // label we have not seen before means filling nothing at all.
+                // Labels are still consulted when the page shows several boxes, which is the
+                // only case where the value actually has to be routed.
                 const cardKeywords = ['信用卡', '簽帳金融卡', '卡號', '卡友'];
                 const serialKeywords = ['序號', '加購', '優惠'];
-                const discountCode = {code_js};
-                const cardPrefix = {card_js};
+                const serialValue = {code_js};
+                const cardValue = {card_js};
+                const configured = [];
+                if (serialValue) configured.push({{ kind: 'serial', value: serialValue }});
+                if (cardValue) configured.push({{ kind: 'card', value: cardValue }});
+
                 let filledCount = 0;
                 const filled = [];
                 const skipped = [];
 
-                const labelDivs = document.querySelectorAll('.exclusive-code .label');
-                for (let label of labelDivs) {{
-                    const labelText = label.textContent.trim();
-                    const container = label.closest('.exclusive-code');
-                    if (!container) continue;
+                function labelFor(input) {{
+                    const box = input.closest('.exclusive-code');
+                    if (!box) return '';
+                    const lbl = box.querySelector('.label');
+                    if (lbl) return lbl.textContent.trim();
+                    return (box.textContent || '').trim();
+                }}
 
-                    const input = container.querySelector('.v-text-field__slot input[type="text"]');
-                    if (!input || input.value) continue;
-
-                    let value = null;
-                    let kind = null;
-                    if (cardKeywords.some(function (k) {{ return labelText.indexOf(k) >= 0; }})) {{
-                        kind = 'card';
-                        value = cardPrefix;
-                    }} else if (serialKeywords.some(function (k) {{ return labelText.indexOf(k) >= 0; }})) {{
-                        kind = 'serial';
-                        value = discountCode;
+                // Scope to .exclusive-code: the page has plenty of other text inputs (search,
+                // login) that must never be typed into.
+                const boxes = document.querySelectorAll('.exclusive-code');
+                const targets = [];
+                for (let i = 0; i < boxes.length; i++) {{
+                    const inputs = boxes[i].querySelectorAll('input[type="text"]');
+                    for (let j = 0; j < inputs.length; j++) {{
+                        if (!inputs[j].value) targets.push(inputs[j]);
                     }}
-                    if (!kind) continue;
+                }}
 
-                    if (!value) {{
-                        // The page wants something we hold no value for. Record which kind so
-                        // the log makes it obvious what is missing from settings.
-                        skipped.push({{ kind: kind, label: labelText.slice(0, 30) }});
+                if (targets.length === 0) {{
+                    return {{ success: false, filledCount: 0, filled: [], skipped: [],
+                             message: 'no empty code input' }};
+                }}
+
+                for (let i = 0; i < targets.length; i++) {{
+                    const input = targets[i];
+                    const labelText = labelFor(input);
+                    let chosen = null;
+
+                    if (targets.length === 1 && configured.length === 1) {{
+                        // Unambiguous: one box, one value. No wording involved.
+                        chosen = configured[0];
+                    }} else {{
+                        const wantsCard = cardKeywords.some(function (k) {{ return labelText.indexOf(k) >= 0; }});
+                        const wantsSerial = serialKeywords.some(function (k) {{ return labelText.indexOf(k) >= 0; }});
+                        if (wantsCard) chosen = configured.find(function (c) {{ return c.kind === 'card'; }}) || null;
+                        else if (wantsSerial) chosen = configured.find(function (c) {{ return c.kind === 'serial'; }}) || null;
+                        // Nothing in the wording matched. Filling the wrong value is
+                        // recoverable (the site rejects it); filling nothing means the button
+                        // stays disabled forever. So always fall back to a configured value,
+                        // preferring the general-purpose code field.
+                        if (!chosen) {{
+                            chosen = configured.find(function (c) {{ return c.kind === 'serial'; }})
+                                     || configured[0] || null;
+                        }}
+                    }}
+
+                    if (!chosen) {{
+                        skipped.push({{ label: labelText.slice(0, 40) }});
                         continue;
                     }}
 
-                    input.value = value;
+                    input.value = chosen.value;
                     input.dispatchEvent(new Event('input', {{ bubbles: true }}));
                     input.dispatchEvent(new Event('change', {{ bubbles: true }}));
                     filledCount++;
-                    filled.push({{ kind: kind, label: labelText.slice(0, 30) }});
+                    filled.push({{ kind: chosen.kind, label: labelText.slice(0, 40) }});
                 }}
 
                 return {{
@@ -2831,17 +2944,11 @@ async def nodriver_ticketplus_order_exclusive_code(tab, config_dict, fail_list):
 
             for item in skipped:
                 if isinstance(item, dict):
-                    if item.get('kind') == 'card':
-                        debug.log(
-                            f"[DISCOUNT CODE] Page asks for a CARD number ('{item.get('label')}') "
-                            "but no credit card prefix is set. Fill it in Settings -> "
-                            "聯絡資訊 -> 信用卡前六碼."
-                        )
-                    else:
-                        debug.log(
-                            f"[DISCOUNT CODE] Page asks for a SERIAL ('{item.get('label')}') "
-                            "but no code is set. Fill it in Settings -> Advanced -> discount_code."
-                        )
+                    debug.log(
+                        f"[DISCOUNT CODE] Found a code box ('{item.get('label')}') but no value "
+                        "is configured for it. Fill Settings -> Advanced -> discount_code "
+                        "or Settings -> contact -> credit_card_prefix."
+                    )
 
             if success and filled_count > 0:
                 for item in filled:
@@ -2851,7 +2958,7 @@ async def nodriver_ticketplus_order_exclusive_code(tab, config_dict, fail_list):
                 debug.log(f"[DISCOUNT CODE] Successfully filled {filled_count} field(s)")
                 return True, fail_list, False
 
-        debug.log("[DISCOUNT CODE] No matching code fields found on page")
+        debug.log(f"[DISCOUNT CODE] Nothing filled ({result.get('message') if isinstance(result, dict) else 'no result'})")
         return False, fail_list, False
 
     except Exception as e:
@@ -2911,6 +3018,8 @@ async def _nodriver_ticketplus_main_impl(tab, url, config_dict, ocr, Captcha_Bro
         _state["last_submit_url"] = ""
         _state["float_btn_misses"] = 0
         _state["spa_mounted"] = False
+        _state["enqueue_requests"] = {}
+        _state["last_enqueue"] = None
 
     home_url = 'https://ticketplus.com.tw/'
     is_user_signin = False
@@ -2994,6 +3103,8 @@ async def _nodriver_ticketplus_main_impl(tab, url, config_dict, ocr, Captcha_Bro
                     _state["spa_mounted"] = True
                 else:
                     await asyncio.sleep(fallback_delay)
+
+            await nodriver_ticketplus_watch_enqueue(tab, config_dict)
 
             is_button_pressed = await nodriver_ticketplus_accept_realname_card(tab)
             is_order_fail_handled = await nodriver_ticketplus_accept_order_fail(tab, debug)
