@@ -58,6 +58,10 @@ CONST_KLOOK_SEAT_CYCLE_CAP_SEC = 10.0
 # window is worth having only while it cannot cost the seats.
 CONST_KLOOK_SEAT_SAFETY_SEC = 12
 
+# Floor for a full page reload. The booking widget mounts asynchronously, so refreshing
+# faster than the page can render means it is never on screen to be read at all.
+CONST_KLOOK_MIN_RELOAD_SEC = 3.0
+
 _state = {}
 
 
@@ -286,6 +290,57 @@ async def _eval(tab, body, timeout=5.0, await_promise=False):
     return parsed if isinstance(parsed, dict) else {"error": "unexpected result"}
 
 
+def _reload_interval_sec(config_dict):
+    """The refresh interval from settings, floored at what a full page load needs.
+
+    A Klook event page mounts its booking widget asynchronously. Reloading faster than the
+    mount takes means the widget is never on screen long enough to be read, and the run
+    livelocks on a page that looks permanently empty - so the configured value is honoured
+    from CONST_KLOOK_MIN_RELOAD_SEC upwards, and the floor is said out loud rather than
+    applied quietly.
+    """
+    raw = config_dict.get("advanced", {}).get("auto_reload_page_interval", 0)
+    try:
+        wanted = float(raw)
+    except (TypeError, ValueError):
+        wanted = 0.0
+    if wanted <= 0:
+        return CONST_KLOOK_MIN_RELOAD_SEC, wanted
+    return max(wanted, CONST_KLOOK_MIN_RELOAD_SEC), wanted
+
+
+async def _klook_maybe_reload(tab, config_dict, debug, why):
+    """Reload the page if the configured interval has elapsed. Returns True if it did."""
+    interval, wanted = _reload_interval_sec(config_dict)
+    now = time.time()
+    last = _state.get("last_reload_at") or 0
+
+    if not last:
+        # First time through: start the clock rather than reloading a page that has only
+        # just finished loading.
+        _state["last_reload_at"] = now
+        return False
+    if now - last < interval:
+        return False
+
+    if 0 < wanted < CONST_KLOOK_MIN_RELOAD_SEC and not _state.get("reload_floor_logged"):
+        _state["reload_floor_logged"] = True
+        print(f"[KLOOK] \u91cd\u65b0\u6574\u7406\u9593\u9694\u8a2d\u5b9a\u70ba {wanted:g} \u79d2\uff0c"
+              f"\u4f46 Klook \u9801\u9762\u8f09\u5165\u6bd4\u9019\u6162\uff0c\u5be6\u969b\u4ee5 "
+              f"{CONST_KLOOK_MIN_RELOAD_SEC:g} \u79d2\u91cd\u6574\uff08\u518d\u5feb\u6703\u5728\u8cfc\u7968"
+              f"\u5340\u756b\u51fa\u4f86\u4e4b\u524d\u5c31\u88ab\u91cd\u8f09\u6389\uff09\u3002")
+
+    _state["last_reload_at"] = now
+    _state["widget_wait_started"] = 0
+    debug.log(f"[KLOOK] Reloading ({why}); interval {interval:g}s")
+    try:
+        await tab.reload()
+    except Exception as exc:
+        debug.log(f"[KLOOK] Reload failed: {type(exc).__name__}: {exc}")
+        return False
+    return True
+
+
 async def nodriver_klook_read_state(tab):
     """Snapshot of the booking widget: which groups exist, what is selected, quantity."""
     return await _eval(tab, r'''
@@ -502,6 +557,7 @@ async def nodriver_klook_select_options(tab, config_dict, debug):
     ''')
 
     if result.get("ok"):
+        _state["last_select_reason"] = None
         idx = result.get("matchedPriority", -1)
         which = f"priority #{idx + 1}" if idx >= 0 else "fallback (no keyword matched)"
         debug.log(f"[KLOOK] Selected via {which}: {result.get('clicked')}")
@@ -514,6 +570,7 @@ async def nodriver_klook_select_options(tab, config_dict, debug):
         return True
 
     reason = result.get("reason") or result.get("error")
+    _state["last_select_reason"] = reason
     if reason == "incomplete":
         debug.log(f"[KLOOK] These groups still have nothing selected: {result.get('unfilled')}. "
                   "The next button stays disabled until every group is set.")
@@ -762,6 +819,10 @@ async def _nodriver_klook_main_impl(tab, url, config_dict, ocr, Captcha_Browser)
         _state["widget_wait_started"] = 0
         _state["seat_click_at"] = 0
         _state["paused_seat_notice"] = False
+        _state["last_reload_at"] = 0
+        _state["last_select_reason"] = None
+        _state["widget_absent_logged"] = False
+        _state["reload_floor_logged"] = False
         _reset_seat_wait()
 
     if await check_and_handle_pause(config_dict):
@@ -809,18 +870,20 @@ async def _nodriver_klook_main_impl(tab, url, config_dict, ocr, Captcha_Browser)
         return _get_status()
 
     if not state.get("hasWidget"):
-        # Before the on-sale moment the wrapper exists but holds no options yet.
+        # Before the on-sale moment the page shows 「即將開賣」 and never renders options, so
+        # sitting on it forever is not an option: this is the branch that has to refresh.
         started = _state.get("widget_wait_started") or time.time()
         _state["widget_wait_started"] = started
         waited = time.time() - started
-        if waited < CONST_KLOOK_WIDGET_WAIT_SEC:
-            return _get_status()
-        debug.log(f"[KLOOK] Booking options still not rendered after {waited:.0f}s "
-                  "(not on sale yet, or the page needs a refresh)")
-        _state["widget_wait_started"] = time.time()
+        if waited >= CONST_KLOOK_WIDGET_WAIT_SEC and not _state.get("widget_absent_logged"):
+            _state["widget_absent_logged"] = True
+            debug.log(f"[KLOOK] Booking options still not rendered after {waited:.0f}s "
+                      "(not on sale yet); refreshing on the configured interval")
+        await _klook_maybe_reload(tab, config_dict, debug, "booking options not rendered")
         return _get_status()
 
     _state["widget_wait_started"] = 0
+    _state["widget_absent_logged"] = False
     if debug.enabled:
         for group in state.get("groups", []):
             picked = [o["text"] for o in group.get("options", []) if o.get("active")]
@@ -828,6 +891,12 @@ async def _nodriver_klook_main_impl(tab, url, config_dict, ocr, Captcha_Browser)
                       f"{len(group.get('options', []))} option(s), selected={picked}")
 
     if not await nodriver_klook_select_options(tab, config_dict, debug):
+        # Nothing on the page matches. That can mean sold out rather than mis-typed, and a
+        # sold-out option only comes back on a fresh page - so refresh. An incomplete
+        # keyword is a different problem: reloading would never fix it and would only bury
+        # the log line that says which group is missing.
+        if _state.get("last_select_reason") == "no-keyword-match":
+            await _klook_maybe_reload(tab, config_dict, debug, "no option matched")
         return _get_status()
 
     if not await nodriver_klook_set_quantity(tab, config_dict, debug):
