@@ -215,7 +215,7 @@ async def nodriver_kham_go_buy_redirect(tab, domain_name):
     is_button_clicked = False
 
     if 'kham.com' in domain_name:
-        my_css_selector = 'div#content > p > a > button[onclick].red'
+        my_css_selector = '#GO_BUY, div#content > p > a > button[onclick].red'
     elif 'ticket.com' in domain_name:
         my_css_selector = 'div.row > div > a.btn.btn-order.btn-block'
     elif 'udnfunlife.com' in domain_name:
@@ -514,6 +514,108 @@ async def nodriver_kham_date_auto_select(tab, domain_name, config_dict):
     Supports: kham.com.tw, ticket.com.tw, udnfunlife.com
     """
     debug = util.create_debug_logger(config_dict)
+
+    if 'kham.com' in domain_name:
+        # KHAM's session table also contains wheelchair sessions and sold-out
+        # prices. Only selectable rows may participate in keyword fallback.
+        import re
+        from html import unescape
+        from nodriver_common import mark_bot_reload
+
+        def parse_keywords(value):
+            value = value.strip()
+            parsed = util.parse_keyword_string_to_array(value)
+            if value and (not parsed or any(not isinstance(item, (str, list)) for item in parsed)):
+                return [value]
+            return parsed
+
+        def matches(keyword, text):
+            if isinstance(keyword, list):
+                return bool(keyword) and all(matches(part, text) for part in keyword)
+            keyword = str(keyword).strip()
+            if not keyword:
+                return True
+            # A UI priority slot can contain semicolon OR alternatives; spaces
+            # join terms with AND. Commas inside quoted prices stay literal.
+            return any(all(util.format_keyword_string(part) in text for part in alternative.split())
+                       for alternative in keyword.split(';') if alternative.strip())
+
+        if await check_and_handle_pause(config_dict):
+            return False
+        date_settings = config_dict.get('date_auto_select', {})
+        date_keyword = date_settings.get('date_keyword', '').strip()
+        keywords = parse_keywords(date_keyword)
+        exclusions = parse_keywords(config_dict.get('keyword_exclude', ''))
+        completed = {str(item).upper() for item in config_dict.get('_kham_completed_performances', [])}
+        candidates = []
+        try:
+            rows = await tab.query_selector_all('table.eventTABLE > tbody > tr')
+        except Exception as exc:
+            debug.log('[KHAM DATE] Read sessions failed:', exc)
+            rows = []
+        for row in rows or []:
+            try:
+                row_html = unescape(await row.get_html())
+                row_text = util.remove_html_tags(row_html).strip()
+                if not row_text or any(keyword and matches(keyword, util.format_keyword_string(row_text))
+                                       for keyword in exclusions):
+                    continue
+                performance = re.search(r'PERFORMANCE_ID=([^&\s\'"<>;]+)', row_html, re.I)
+                if performance and performance.group(1).upper() in completed:
+                    continue
+                buttons = re.findall(r'<button\b([^>]*)>(.*?)</button>', row_html, re.I | re.S)
+                buy_buttons = [(attrs, text) for attrs, text in buttons
+                               if any(label in text for label in ('立即訂購', '點此購票'))]
+                if not buy_buttons:
+                    continue
+                attrs, _ = buy_buttons[0]
+                if re.search(r'\bdisabled(?:\s|=|$)', attrs, re.I):
+                    continue
+                cells = re.findall(r'<td\b[^>]*>(.*?)</td>', row_html, re.I | re.S)
+                if len(cells) >= 3:
+                    prices = cells[2].split('、')
+                    if prices and all('lightblue' in price.lower() for price in prices):
+                        continue
+                candidates.append((row, row_text))
+            except Exception as exc:
+                debug.log('[KHAM DATE] Read session row failed:', exc)
+
+        matched = []
+        if not date_keyword:
+            matched = [row for row, _ in candidates]
+        for keyword in keywords:
+            matched = [row for row, text in candidates
+                       if matches(keyword, util.format_keyword_string(text))]
+            if matched:
+                break
+        if not matched and date_keyword and config_dict.get('date_auto_fallback', False):
+            matched = [row for row, _ in candidates]
+        target = util.get_target_item_from_matched_list(
+            matched, date_settings.get('mode', CONST_FROM_TOP_TO_BOTTOM))
+        if target:
+            try:
+                button = await target.query_selector('button:not([disabled])')
+                if button and not await check_and_handle_pause(config_dict):
+                    await button.click()
+                    debug.log('[KHAM DATE] Session selected')
+                    return True
+            except Exception as exc:
+                debug.log('[KHAM DATE] Select session failed:', exc)
+
+        # Missing, excluded, not-yet-open and unmatched rows all reach the same
+        # configured retry. The former early returns silently stopped polling.
+        if config_dict.get('tixcraft', {}).get('auto_reload_coming_soon_page', False):
+            try:
+                interval = max(0.0, float(config_dict.get('advanced', {}).get('auto_reload_page_interval', 1.0)))
+                if await asyncio_sleep_with_pause_check(interval, config_dict):
+                    return False
+                if await check_and_handle_pause(config_dict):
+                    return False
+                mark_bot_reload()
+                await tab.reload()
+            except Exception as exc:
+                debug.log('[KHAM DATE] Reload failed:', exc)
+        return False
 
     # Wait for page to load
     await tab.sleep(0.6)
@@ -894,6 +996,84 @@ async def nodriver_kham_area_auto_select(tab, domain_name, config_dict, area_key
 
     debug = util.create_debug_logger(config_dict)
     auto_select_mode = config_dict["area_auto_select"]["mode"]
+
+    if 'kham.com' in domain_name:
+        # Class matching must allow the site's extra classes (e.g. filter-ready).
+        # Exact [class='status_tr'] does not find the saved/live KHAM area rows.
+        import re
+        from html import unescape
+
+        def parse_keywords(value):
+            value = value.strip()
+            parsed = util.parse_keyword_string_to_array(value)
+            if value and (not parsed or any(not isinstance(item, (str, list)) for item in parsed)):
+                return [value]
+            return parsed
+
+        def matches(keyword, text):
+            if isinstance(keyword, list):
+                return bool(keyword) and all(matches(part, text) for part in keyword)
+            keyword = str(keyword).strip()
+            if not keyword:
+                return True
+            return any(all(util.format_keyword_string(part) in text for part in alternative.split())
+                       for alternative in keyword.split(';') if alternative.strip())
+
+        exclusions = parse_keywords(config_dict.get('keyword_exclude', ''))
+        try:
+            rows = await tab.query_selector_all('table#salesTable > tbody > tr.status_tr')
+        except Exception as exc:
+            debug.log('[KHAM AREA] Read areas failed:', exc)
+            return True, False, False
+        available = []
+        ticket_number = int(config_dict.get('ticket_number', 1))
+        for row in rows or []:
+            try:
+                row_html = unescape(await row.get_html())
+                row_text = util.remove_html_tags(row_html).strip()
+                if not row_text or '售完' in row_text or re.search(r'\bSoldout\b', row_html, re.I):
+                    continue
+                if any(keyword and matches(keyword, util.format_keyword_string(row_text)) for keyword in exclusions):
+                    continue
+                cells = re.findall(r'<td\b[^>]*>(.*?)</td>', row_html, re.I | re.S)
+                if cells:
+                    stock_text = util.remove_html_tags(cells[-1]).strip().replace(',', '')
+                    # Read the complete stock value: 100 seats is not zero seats.
+                    if stock_text.isdigit() and int(stock_text) < ticket_number:
+                        continue
+                available.append((row, row_text))
+            except Exception as exc:
+                debug.log('[KHAM AREA] Read area row failed:', exc)
+        # None requests the complete configured priority list in one DOM scan.
+        # Explicit strings/lists retain the single-keyword/AND-group interface.
+        if area_keyword_item is None:
+            configured = config_dict.get('area_auto_select', {}).get('area_keyword', '').strip()
+            priorities = parse_keywords(configured)
+            if not configured:
+                priorities = ['']
+        else:
+            priorities = [area_keyword_item]
+        matched = []
+        is_keyword_matched = False
+        for keyword in priorities:
+            matched = [row for row, text in available
+                       if matches(keyword, util.format_keyword_string(text))]
+            if matched:
+                is_keyword_matched = bool(keyword)
+                break
+        if not matched and config_dict.get('area_auto_fallback', False):
+            matched = [row for row, _ in available]
+        target = util.get_target_item_from_matched_list(matched, auto_select_mode)
+        if not target:
+            return True, False, False
+        if await check_and_handle_pause(config_dict):
+            return False, False, False
+        try:
+            await target.click()
+            return False, True, is_keyword_matched
+        except Exception as exc:
+            debug.log('[KHAM AREA] Select area failed:', exc)
+            return True, False, False
 
     # Feature 003: Safe access for conditional fallback switch
     area_auto_fallback = config_dict.get('area_auto_fallback', False)
@@ -1402,6 +1582,30 @@ async def nodriver_kham_performance(tab, config_dict, ocr, domain_name, model_na
     """
     debug = util.create_debug_logger(config_dict)
 
+    if 'kham.com' in domain_name:
+        from nodriver_common import mark_bot_reload
+
+        if await check_and_handle_pause(config_dict):
+            return False, False
+        # Check every priority against one snapshot before a single fallback
+        # click can navigate away. Re-reading each row per keyword is costly.
+        _, selected, _ = await nodriver_kham_area_auto_select(
+            tab, domain_name, config_dict, None)
+        if selected:
+            return True, False
+        try:
+            interval = max(0.0, float(config_dict.get('advanced', {}).get('auto_reload_page_interval', 1.0)))
+            if await asyncio_sleep_with_pause_check(interval, config_dict):
+                return False, False
+            if await check_and_handle_pause(config_dict):
+                return False, False
+            mark_bot_reload()
+            await tab.reload()
+        except Exception as exc:
+            debug.log('[KHAM AREA] Reload failed:', exc)
+        # KHAM's captcha and quantity controls are on the next (seat) page.
+        return False, False
+
     is_price_assign_by_bot = False
     is_captcha_sent = False
 
@@ -1480,7 +1684,15 @@ async def nodriver_kham_main(tab, url, config_dict, ocr):
     """
     # 函數開始時檢查暫停
     if await check_and_handle_pause(config_dict):
-        return False
+        return tab
+    # KHAM owns a per-tab purchase queue. Other UTK-family sites keep their
+    # existing flow and state. Import lazily to avoid a circular adapter import.
+    from urllib.parse import urlsplit
+    if (urlsplit(url).hostname or "").lower() in ("kham.com.tw", "www.kham.com.tw"):
+        from platforms import kham_flow
+        import sys
+        if await kham_flow.run(tab, url, config_dict, ocr, sys.modules[__name__]):
+            return tab
     if not _state:
         _state.update({
             "is_popup_checkout": False,

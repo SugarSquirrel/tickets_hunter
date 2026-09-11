@@ -59,6 +59,11 @@ if (area_select_mode) {
     area_select_mode.addEventListener('change', _toggle_smart_rows);
 }
 const keyword_exclude = document.querySelector('#keyword_exclude');
+const kham_ticket_queue_cards = document.querySelector('#kham_ticket_queue_cards');
+const kham_add_next_ticket = document.querySelector('#kham_add_next_ticket');
+const kham_first_ticket_down = document.querySelector('#kham_first_ticket_down');
+const kham_ticket_queue_status = document.querySelector('#kham_ticket_queue_status');
+const kham_ticket_queue_error = document.querySelector('#kham_ticket_queue_error');
 
 // advance
 const play_ticket_sound = document.querySelector('#play_ticket_sound');
@@ -249,7 +254,7 @@ function _area_kw_update_button_states() {
     if (btn_area_kw_remove) btn_area_kw_remove.disabled = count <= AREA_KW_MIN_SLOTS;
 }
 
-function populate_area_keyword_slots(json_array_string) {
+function populate_area_keyword_slots(json_array_string, preserveAll = false) {
     if (!area_keyword_slots_div) return;
     area_keyword_slots_div.innerHTML = '';
 
@@ -268,7 +273,7 @@ function populate_area_keyword_slots(json_array_string) {
         }
     }
 
-    if (items.length > AREA_KW_MAX_SLOTS) {
+    if (items.length > AREA_KW_MAX_SLOTS && !preserveAll) {
         console.warn(`[area_keyword] >${AREA_KW_MAX_SLOTS} items, truncating extras (please verify):`, items.slice(AREA_KW_MAX_SLOTS));
         items = items.slice(0, AREA_KW_MAX_SLOTS);
     }
@@ -314,6 +319,213 @@ if (btn_area_kw_remove) {
         if (last) last.remove();
         _area_kw_rebuild_labels();
         _area_kw_update_button_states();
+    });
+}
+
+// KHAM queue: the existing basic fields always edit entry 1. Later entries
+// use one line per area priority, preserving semicolons within a priority.
+function kham_area_keyword_for_display(raw) {
+    if (!raw) return '';
+    try {
+        return JSON.parse('[' + raw + ']').map(item => String(item ?? '')).join('\n');
+    } catch (error) {
+        return String(raw);
+    }
+}
+
+function kham_area_keyword_for_config(value) {
+    return (value || '').split(/\r?\n/).map(item => item.trim())
+        .filter(Boolean).map(item => JSON.stringify(item)).join(',');
+}
+
+function collect_kham_ticket_queue() {
+    const queue = [{
+        ticket_number: Number(ticket_number.value),
+        date_keyword: format_config_keyword_for_json(date_keyword.value),
+        area_keyword: collect_area_keyword_slots()
+    }];
+    if (kham_ticket_queue_cards) {
+        kham_ticket_queue_cards.querySelectorAll('.kham-ticket-card').forEach(card => {
+            queue.push({
+                ticket_number: Number(card.querySelector('.kham-ticket-number').value),
+                date_keyword: format_config_keyword_for_json(card.querySelector('.kham-date-keyword').value),
+                area_keyword: kham_area_keyword_for_config(card.querySelector('.kham-area-keyword').value)
+            });
+        });
+    }
+    return queue;
+}
+
+function kham_clear_queue_error() {
+    if (kham_ticket_queue_error) {
+        kham_ticket_queue_error.hidden = true;
+        kham_ticket_queue_error.textContent = '';
+    }
+}
+
+function kham_queue_button(label, action, index, disabled) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn btn-sm ' + (action === 'remove' ? 'btn-outline-danger' : 'btn-outline-secondary');
+    button.textContent = label;
+    button.disabled = !!disabled;
+    button.dataset.action = action;
+    button.dataset.index = String(index);
+    button.setAttribute('aria-label', `第 ${index + 1} 筆票單：${label}`);
+    return button;
+}
+
+function kham_queue_field(card, index, field, labelText, value) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'mb-3';
+    const label = document.createElement('label');
+    label.className = 'form-label';
+    const id = `kham_ticket_${index}_${field}`;
+    label.htmlFor = id;
+    label.textContent = labelText;
+    let input;
+    if (field === 'number') {
+        input = ticket_number.cloneNode(true);
+        input.className = 'form-select highlight-field kham-ticket-number';
+        input.removeAttribute('aria-label');
+    } else {
+        input = document.createElement('textarea');
+        input.className = `form-control highlight-field kham-${field}-keyword`;
+        input.rows = field === 'area' ? 3 : 2;
+        input.placeholder = field === 'date' ? '例如 2026/10/04' : '例如 A區;B區\nC區';
+    }
+    input.id = id;
+    input.value = value;
+    wrapper.append(label, input);
+    if (field !== 'number') {
+        const hint = document.createElement('div');
+        hint.id = id + '_hint';
+        hint.className = 'form-text';
+        hint.textContent = field === 'date'
+            ? '請填本筆要購買的日期；空白為 AND，分號 ; 為 OR。'
+            : '每行是一個優先序，從上到下嘗試；同一行用分號 ; 表示任一符合，空白為 AND。留空表示不限區域。';
+        input.setAttribute('aria-describedby', hint.id);
+        wrapper.appendChild(hint);
+    }
+    card.appendChild(wrapper);
+}
+
+function render_kham_ticket_queue(queue, updateFirst = true) {
+    if (!kham_ticket_queue_cards) return;
+    kham_ticket_queue_cards.replaceChildren();
+    if (queue.length && updateFirst) {
+        ticket_number.value = queue[0].ticket_number;
+        date_keyword.value = format_keyword_for_display(queue[0].date_keyword || '');
+        // Reordering a later ticket must never truncate its priority list.
+        populate_area_keyword_slots(queue[0].area_keyword || '', true);
+    }
+    queue.slice(1).forEach((entry, offset) => {
+        const index = offset + 1;
+        const card = document.createElement('section');
+        card.className = 'card card-body kham-ticket-card mb-3';
+        const header = document.createElement('div');
+        header.className = 'd-flex flex-wrap justify-content-between align-items-center gap-2 mb-3';
+        const title = document.createElement('h6');
+        title.id = `kham_ticket_${index}_title`;
+        title.className = 'mb-0';
+        title.textContent = `第 ${index + 1} 筆票單`;
+        card.setAttribute('aria-labelledby', title.id);
+        const buttons = document.createElement('div');
+        buttons.className = 'd-flex gap-2';
+        buttons.append(
+            kham_queue_button('↑ 上移', 'up', index, false),
+            kham_queue_button('↓ 下移', 'down', index, index === queue.length - 1),
+            kham_queue_button('刪除', 'remove', index, false)
+        );
+        header.append(title, buttons);
+        card.appendChild(header);
+        kham_queue_field(card, index, 'number', '票數', entry.ticket_number);
+        kham_queue_field(card, index, 'date', '日期關鍵字', format_keyword_for_display(entry.date_keyword || ''));
+        kham_queue_field(card, index, 'area', '區域關鍵字', kham_area_keyword_for_display(entry.area_keyword || ''));
+        kham_ticket_queue_cards.appendChild(card);
+    });
+    if (kham_first_ticket_down) kham_first_ticket_down.disabled = queue.length < 2;
+    if (kham_ticket_queue_status) kham_ticket_queue_status.textContent = `共 ${Math.max(queue.length, 1)} 筆，依序購買`;
+    kham_clear_queue_error();
+}
+
+function load_kham_ticket_queue(config) {
+    const queue = config.kham && Array.isArray(config.kham.ticket_queue) ? config.kham.ticket_queue : [];
+    const entries = queue.filter(entry => entry && typeof entry === 'object');
+    // Ignore KHAM's first entry on other platforms, whose common fields retain
+    // their normal meaning. The saved KHAM queue itself is left untouched.
+    render_kham_ticket_queue(entries, detectPlatform(config.homepage) === 'kham');
+}
+
+function move_kham_ticket(index, direction) {
+    const queue = collect_kham_ticket_queue();
+    const next = index + direction;
+    if (next < 0 || next >= queue.length) return;
+    [queue[index], queue[next]] = [queue[next], queue[index]];
+    render_kham_ticket_queue(queue);
+    const focus = next === 0 ? ticket_number : document.querySelector(`#kham_ticket_${next}_number`);
+    if (focus) focus.focus();
+}
+
+function validate_kham_ticket_queue() {
+    kham_clear_queue_error();
+    if (detectPlatform(homepage.value) !== 'kham') return true;
+    const queue = collect_kham_ticket_queue();
+    const dates = new Set();
+    for (let index = 0; index < queue.length; index++) {
+        const entry = queue[index];
+        const normalizedDate = format_keyword_for_display(entry.date_keyword).trim().toLowerCase().replace(/\s+/g, ' ');
+        let error = '';
+        let field = 'number';
+        if (!Number.isInteger(entry.ticket_number) || entry.ticket_number < 1 || entry.ticket_number > 10) {
+            error = `第 ${index + 1} 筆票單：請選擇 1 至 10 張票。`;
+        } else if (queue.length > 1 && !normalizedDate) {
+            error = `第 ${index + 1} 筆票單：接續購票需要填寫日期關鍵字，以區分不同天的場次。`;
+            field = 'date';
+        } else if (queue.length > 1 && dates.has(normalizedDate)) {
+            error = `第 ${index + 1} 筆票單：日期關鍵字與前面的票單重複，接續購票僅支援不同日期場次。`;
+            field = 'date';
+        }
+        dates.add(normalizedDate);
+        if (error) {
+            if (kham_ticket_queue_error) {
+                kham_ticket_queue_error.textContent = error;
+                kham_ticket_queue_error.hidden = false;
+            }
+            run_message(error);
+            const input = index === 0 ? (field === 'number' ? ticket_number : date_keyword)
+                : document.querySelector(`#kham_ticket_${index}_${field}`);
+            if (input) input.focus();
+            return false;
+        }
+    }
+    return true;
+}
+
+if (kham_add_next_ticket) {
+    kham_add_next_ticket.addEventListener('click', () => {
+        const queue = collect_kham_ticket_queue();
+        const previous = queue[queue.length - 1];
+        queue.push({ticket_number: previous.ticket_number || 1, date_keyword: '', area_keyword: previous.area_keyword});
+        render_kham_ticket_queue(queue);
+        document.querySelector(`#kham_ticket_${queue.length - 1}_date`).focus();
+    });
+}
+if (kham_first_ticket_down) kham_first_ticket_down.addEventListener('click', () => move_kham_ticket(0, 1));
+if (kham_ticket_queue_cards) {
+    kham_ticket_queue_cards.addEventListener('input', kham_clear_queue_error);
+    kham_ticket_queue_cards.addEventListener('click', event => {
+        const button = event.target.closest('button[data-action]');
+        if (!button || !kham_ticket_queue_cards.contains(button)) return;
+        const index = Number(button.dataset.index);
+        if (button.dataset.action === 'remove') {
+            const queue = collect_kham_ticket_queue();
+            queue.splice(index, 1);
+            render_kham_ticket_queue(queue);
+            kham_add_next_ticket.focus();
+        } else {
+            move_kham_ticket(index, button.dataset.action === 'up' ? -1 : 1);
+        }
     });
 }
 
@@ -436,6 +648,7 @@ function load_settins_to_form(settings)
         _toggle_smart_sort_rank_row();
 
         keyword_exclude.value = format_keyword_for_display(settings.keyword_exclude);
+        load_kham_ticket_queue(settings);
         
         // advanced
 
@@ -711,8 +924,8 @@ function message_old(msg)
 
 function maxbot_launch()
 {
+    if (!save_changes_to_dict(true)) return;
     run_message("啟動 MaxBot 主程式中...");
-    save_changes_to_dict(true);
     maxbot_save_api(maxbot_run_api);
 }
 
@@ -756,11 +969,13 @@ function maxbot_shutdown_api()
 
 function save_changes_to_dict(silent_flag)
 {
+    if (!settings || !validate_kham_ticket_queue()) return false;
     const ticket_number_value = parseInt(ticket_number.value);
     //console.log(ticket_number_value);
     if (!ticket_number_value)
     {
-        message('提示: 請指定張數');
+        run_message('提示: 請指定張數');
+        return false;
     } else {
         if(settings) {
 
@@ -786,6 +1001,13 @@ function save_changes_to_dict(silent_flag)
             settings.area_auto_fallback = area_auto_fallback.checked;
 
             settings.keyword_exclude = format_config_keyword_for_json(keyword_exclude.value);
+            if (detectPlatform(homepage.value) === 'kham') {
+                if (!settings.kham || typeof settings.kham !== 'object' || Array.isArray(settings.kham)) settings.kham = {};
+                const queue = collect_kham_ticket_queue();
+                // With one entry the legacy fields are sufficient. For multiple
+                // entries store the complete order, including the common fields.
+                settings.kham.ticket_queue = queue.length > 1 ? queue : [];
+            }
 
             // advanced
             settings.advanced.play_sound.ticket = play_ticket_sound.checked;
@@ -971,6 +1193,7 @@ function save_changes_to_dict(silent_flag)
             message('已存檔');
         }
     }
+    return true;
 }
 
 function maxbot_save_api(callback)
@@ -1035,8 +1258,8 @@ function maxbot_resume_api()
 }
 function maxbot_save()
 {
+    if (!save_changes_to_dict(true)) return;
     run_message("儲存中...");
-    save_changes_to_dict(true);  // silent mode - don't show modal
     maxbot_save_api(function() {
         run_message("已存檔");
     });
@@ -1995,8 +2218,11 @@ if (btn_save_preset) {
             return;
         }
         // First flush any unsaved form edits to settings.json, then copy it.
+        if (!save_changes_to_dict(true)) {
+            _presets_set_status('請先修正購票設定後再存檔', 'err');
+            return;
+        }
         _presets_set_status('儲存中…', '');
-        save_changes_to_dict(true);
         maxbot_save_api(function() {
             $.ajax({
                 url: '/presets/save',
@@ -2098,7 +2324,10 @@ if (btn_save_to_preset) {
             return;
         }
         // Pull current form values into the `settings` global.
-        save_changes_to_dict(true);
+        if (!save_changes_to_dict(true)) {
+            _presets_set_status('請先修正購票設定後再存檔', 'err');
+            return;
+        }
         $.ajax({
             url: '/presets/write_form',
             type: 'POST',

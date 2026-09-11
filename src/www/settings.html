@@ -3,6 +3,7 @@
 <head>
   <title>Tickets Hunter - 多平台搶票自動化系統</title>
   <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
@@ -328,6 +329,15 @@
           </div>
         </div>
 
+        <div class="row mb-3 disappear" data-under="kham">
+          <div class="col-sm-10 col-lg-8 col-xl-6 offset-sm-2">
+            <div class="d-flex justify-content-between align-items-center gap-2">
+              <h5 class="mb-0">第 1 筆票單</h5>
+              <button type="button" id="kham_first_ticket_down" class="btn btn-sm btn-outline-secondary" disabled aria-label="將第 1 筆票單下移">↓ 下移</button>
+            </div>
+            <small class="text-muted">下方張數、日期與區域是第一筆；可在排除關鍵字下方新增「下一張票」。</small>
+          </div>
+        </div>
         <div class="row mb-3">
           <label for="ticket_number" class="col-sm-2 col-form-label">張數<span class="help-icon" data-help="ticket_number" title="張數說明" tabindex="0" role="button" aria-label="張數 說明"></span></label>
           <div class="col-sm-10 col-lg-8 col-xl-6">
@@ -713,6 +723,18 @@
           </label>
           <div class="col-sm-10 col-lg-8 col-xl-6">
             <textarea class="form-control highlight-field" id="keyword_exclude" rows="3"></textarea>
+            <small class="text-muted disappear" data-under="kham">所有票單共用這份排除關鍵字。</small>
+          </div>
+        </div>
+        <div class="row mt-4 mb-3 disappear" data-under="kham" id="kham_ticket_queue_section">
+          <div class="col-sm-10 col-lg-8 col-xl-6 offset-sm-2">
+            <h5>寬宏接續購票</h5>
+            <p class="small text-muted">限同一個演唱會的不同日期場次。依票單順序加入購物車，確認成功後立即返回場次頁搶下一筆；全部完成才停在購物車結帳頁。排序方式、排除關鍵字與刷新間隔共用原設定。</p>
+            <p class="small text-muted">接續購票開始後，變更票單內容或順序需重新啟動機器人；刷新間隔與排除關鍵字可存檔即時更新。</p>
+            <div id="kham_ticket_queue_cards"></div>
+            <button type="button" id="kham_add_next_ticket" class="btn btn-outline-primary">＋ 下一張票</button>
+            <span id="kham_ticket_queue_status" class="small text-muted ms-2" role="status" aria-live="polite"></span>
+            <p id="kham_ticket_queue_error" class="small text-danger mt-2 mb-0" role="alert" hidden></p>
           </div>
         </div>
         <div class="row">

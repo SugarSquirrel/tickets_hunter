@@ -286,3 +286,21 @@ textarea {
     margin-top: 0;
 }
 
+/* Queue actions stay readable on both settings themes. */
+[data-bs-theme="dark"] #kham_ticket_queue_section .btn-outline-secondary,
+[data-bs-theme="dark"] #kham_first_ticket_down {
+    --bs-btn-color: #ced4da;
+    --bs-btn-border-color: #adb5bd;
+    --bs-btn-hover-color: #212529;
+    --bs-btn-hover-bg: #ced4da;
+    --bs-btn-hover-border-color: #ced4da;
+    --bs-btn-disabled-color: #ced4da;
+    --bs-btn-disabled-border-color: #adb5bd;
+}
+[data-bs-theme="dark"] #kham_ticket_queue_section .btn-outline-danger {
+    --bs-btn-color: #ea868f;
+    --bs-btn-border-color: #ea868f;
+    --bs-btn-hover-color: #212529;
+    --bs-btn-hover-bg: #ea868f;
+    --bs-btn-hover-border-color: #ea868f;
+}

@@ -137,6 +137,9 @@ def get_default_config():
     config_dict["area_auto_select"]["smart_sort_rank_n"] = 1
     config_dict["keyword_exclude"] = CONST_EXCLUDE_DEFAULT
 
+    # Empty queue preserves the existing single-ticket settings.
+    config_dict["kham"] = {"ticket_queue": []}
+
     config_dict['kktix']={}
     config_dict["kktix"]["auto_press_next_step_button"] = True
     config_dict["kktix"]["auto_fill_ticket_number"] = True
@@ -390,7 +393,7 @@ def migrate_config(config_dict):
 
     # Ensure all default fields exist (fills missing keys from new versions)
     default = get_default_config()
-    for section in ["advanced", "kktix", "tixcraft", "date_auto_select", "area_auto_select", "ocr_captcha", "contact", "accounts", "cityline"]:
+    for section in ["advanced", "kktix", "kham", "tixcraft", "date_auto_select", "area_auto_select", "ocr_captcha", "contact", "accounts", "cityline"]:
         if section in default:
             if section not in config_dict or not isinstance(config_dict[section], dict):
                 config_dict[section] = dict(default[section])
@@ -809,6 +812,16 @@ class SaveJsonHandler(tornado.web.RequestHandler):
                 error_message = "wrong json format"
                 error_code = 1002
                 pass
+
+        if is_pass_check:
+            try:
+                if _body.get("kham", {}).get("ticket_queue"):
+                    from platforms.kham_flow import ticket_plan
+                    ticket_plan(_body)
+            except (ValueError, TypeError, AttributeError, KeyError) as exc:
+                self.set_status(400)
+                self.finish(dict(error=dict(message=str(exc), code=1003)))
+                return
 
         if is_pass_check:
             app_root = util.get_app_root()

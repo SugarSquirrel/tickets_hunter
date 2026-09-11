@@ -605,7 +605,7 @@ async def reload_config(config_dict, last_mtime):
                 # Update fields
                 fields = [
                     "ticket_number", "date_auto_select", "area_auto_select", "keyword_exclude",
-                    "ocr_captcha", "tixcraft", "kktix", "cityline",
+                    "ocr_captcha", "tixcraft", "kktix", "kham", "cityline",
                     "refresh_datetime", "contact", "date_auto_fallback", "area_auto_fallback"
                 ]
                 for field in fields:

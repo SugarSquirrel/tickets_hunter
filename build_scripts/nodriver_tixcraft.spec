@@ -52,6 +52,7 @@ a = Analysis(
         'platforms.tixcraft',
         'platforms.ibon',
         'platforms.kham',
+        'platforms.kham_flow',
         'platforms.hkticketing',
         # Chrome downloader dependencies
         'requests',
