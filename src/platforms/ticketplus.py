@@ -1755,6 +1755,7 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword, all
                         (function() {{
                             const target = {ticket_number};
                             const ticketTypeTerms = {ticket_type_terms_js};
+                            const allowLessTickets = {allow_less_js};
 
                             function normRow(s) {{
                                 return (s || '').replace(/,/g, '').replace(/\\s+/g, ' ').trim();
@@ -1850,6 +1851,20 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword, all
                                 const budget = Math.min(Math.abs(delta), 20);
                                 if (delta > 0) {{
                                     for (let i = 0; i < budget; i++) plus.click();
+                                    // Clicking is not selecting. While a refresh is in flight the
+                                    // site renders every plus disabled until the server answers,
+                                    // and a click there does nothing. Reporting it as selected
+                                    // sent the bot on to a next button that stayed grey, and the
+                                    // cycle was lost. Not reporting it keeps this loop polling,
+                                    // which is exactly the wait for the server's answer.
+                                    const total = vueTotalTicket();
+                                    if (total !== null && total < target) {{
+                                        if (!allowLessTickets && total > 0 && minus) {{
+                                            for (let i = 0; i < 20 && vueTotalTicket() > 0; i++) minus.click();
+                                        }}
+                                        return {{ clicked: false, before: before, clicks: budget,
+                                                 reason: 'no-effect', total: total }};
+                                    }}
                                     return {{ clicked: true, before: before, clicks: budget }};
                                 }}
                                 if (!minus) return {{ clicked: false, before: before, clicks: 0 }};
