@@ -1486,6 +1486,14 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword, all
                         // synchronously on click (only the DOM patch is deferred), so the real
                         // figure is readable right now.
                         const actual = vueTotalTicket();
+                        // Nothing at all was added: the plus did not respond (while a refresh
+                        // is in flight the site renders it disabled). That is not a short order
+                        // to accept even when short orders are allowed - it is no order. Hand it
+                        // to the retry loop, whose polling is the wait for the server's answer.
+                        if (actual === 0) {{
+                            return {{ ok: false, reason: 'no-effect', got: 0, want: target,
+                                     rowText: meta.rowText }};
+                        }}
                         if (!allowLessTickets && actual !== null && actual < target) {{
                             // Undo, otherwise the leftover selection blocks other zones and can
                             // still be submitted as a short order.
@@ -1736,6 +1744,8 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword, all
                         f"(got {result.get('got')}, want {result.get('want')}); selection undone. "
                         "Turn on 'allow_less_tickets' if a short order is acceptable."
                     )
+                elif apply_reason == 'no-effect':
+                    debug.log("[RETRY] Plus did not respond (page still refreshing?); waiting for it...")
                 elif apply_reason == 'unreadable-count':
                     # Deliberate refusal, not a glitch: the stepper value could not be read
                     # and the component total says something is already selected, so
