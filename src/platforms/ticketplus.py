@@ -79,6 +79,10 @@ CONST_TICKETPLUS_FLOAT_BTN_MISS_LIMIT = 3
 # the Python retry path. It normally mounts in tens of milliseconds.
 CONST_TICKETPLUS_STEPPER_WAIT_MS = 800
 
+# Once a zone's body has rendered without a stepper (not on sale yet, or not for sale to this
+# session), how long to wait in case it is mid-patch before moving to the next keyword.
+CONST_TICKETPLUS_NOT_ON_SALE_GRACE_MS = 150
+
 _state = {}
 
 
@@ -1169,11 +1173,18 @@ async def nodriver_ticketplus_date_auto_select(tab, config_dict):
     return is_date_clicked
 
 
-async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword):
-    """TicketPlus unified selector - language-independent ticket type/area selection."""
+async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword, allow_fallback=None):
+    """TicketPlus unified selector - language-independent ticket type/area selection.
+
+    allow_fallback overrides the area_auto_fallback setting for this one call; the keyword
+    loop passes it so only the last keyword may fall back. None means use the setting.
+    """
     debug = util.create_debug_logger(config_dict)
     auto_select_mode = config_dict["area_auto_select"]["mode"]
-    area_auto_fallback = config_dict.get('area_auto_fallback', False)
+    if allow_fallback is None:
+        area_auto_fallback = config_dict.get('area_auto_fallback', False)
+    else:
+        area_auto_fallback = bool(allow_fallback)
     ticket_number = config_dict["ticket_number"]
     keyword_exclude = config_dict.get("keyword_exclude", "")
 
@@ -1263,6 +1274,7 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword):
         allow_less = bool(config_dict.get("advanced", {}).get("allow_less_tickets", False))
         allow_less_js = 'true' if allow_less else 'false'
         stepper_wait_ms = CONST_TICKETPLUS_STEPPER_WAIT_MS
+        not_on_sale_grace_ms = CONST_TICKETPLUS_NOT_ON_SALE_GRACE_MS
 
         area_keyword_js = json.dumps(area_keyword or "")
         auto_select_mode_js = json.dumps(auto_select_mode or "")
@@ -1594,18 +1606,44 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword):
                         let settled = false;
                         let observer = null;
                         let timer = null;
+                        let graceTimer = null;
 
                         function finish(res) {{
                             if (settled) return;
                             settled = true;
                             try {{ if (observer) observer.disconnect(); }} catch (e) {{}}
                             if (timer) clearTimeout(timer);
+                            if (graceTimer) clearTimeout(graceTimer);
                             resolve(res);
+                        }}
+
+                        // A body that has rendered but holds no stepper is a zone that cannot be
+                        // bought right now: before the opening the site shows the sale-start time
+                        // there instead, and the stepper only appears once a refresh brings the
+                        // server's "onsale". Treating that as "not mounted yet" spent the whole
+                        // wait plus the Python retries - about 2s per keyword - so with nine
+                        // keywords the refresh that reveals the opening came ~20s apart. The body
+                        // and its stepper render in the same patch, so a short grace is enough.
+                        function bodyRendered() {{
+                            const body = target.panel.querySelector('.v-expansion-panel-content');
+                            return !!(body && body.querySelector('*'));
+                        }}
+
+                        function armGrace() {{
+                            if (graceTimer || settled) return;
+                            graceTimer = setTimeout(function () {{
+                                if (attempt()) return;
+                                finish({{ success: false, type: 'expansion_panel', selected: target.name,
+                                         clicked: false, notOnSale: true }});
+                            }}, {not_on_sale_grace_ms});
                         }}
 
                         function attempt() {{
                             if (settled) return true;
-                            if (!pickTicketBox(target.panel)) return false;
+                            if (!pickTicketBox(target.panel)) {{
+                                if (bodyRendered()) armGrace();
+                                return false;
+                            }}
                             const applied = applyCount(target.panel, ticketNumber);
                             applied.waitedMs = Date.now() - startedAt;
                             console.log('applyCount (after wait):', JSON.stringify(applied));
@@ -1870,13 +1908,17 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword):
                         # one was picked - the perk usually cannot be added after checkout.
                         mark = "PREFERRED" if result.get('rowPreferred') else "first available"
                         debug.log(f"[TICKET TYPE] Chose ({mark}) from {result.get('rowCount', '?')} row(s): {row_text}")
+                elif result.get('notOnSale'):
+                    debug.log(f"[NOT ON SALE] '{result.get('selected')}' shows no stepper (not open yet, "
+                              "or not sold in this session); moving on")
                 elif result.get('strict_mode'):
                     kw = result.get('attempted_keyword') or area_keyword
                     if result.get('keyword_in_sold_out'):
                         debug.log(f"[STRICT] Target area '{kw}' is currently sold out (remaining 0); strict mode keeps refreshing for returns.")
                     else:
                         debug.log(f"[STRICT] No purchasable area matches '{kw}'; strict mode keeps refreshing.")
-                    debug.log("[STRICT] To auto-fallback to other available areas, enable: Advanced Settings -> area_auto_fallback")
+                    if not config_dict.get('area_auto_fallback', False):
+                        debug.log("[STRICT] To auto-fallback to other available areas, enable: Advanced Settings -> area_auto_fallback")
                 else:
                     low = result.get('lowStockSkipped')
                     if low:
@@ -2542,10 +2584,18 @@ async def nodriver_ticketplus_order(tab, config_dict, ocr, Captcha_Browser):
     keyword_matched = False
 
     if len(keyword_array) > 0:
+        # Fallback means "when every keyword has missed" (that is how the settings page explains
+        # it), so it may only kick in on the last keyword. It used to be applied to each call,
+        # which let the first miss jump straight to the fallback pool: keywords 2..N were never
+        # tried, and a second target zone with tickets left lost to a random one.
+        area_auto_fallback = config_dict.get('area_auto_fallback', False)
         for keyword_index, area_keyword_item in enumerate(keyword_array):
             debug.log(f"[TicketPlus AREA KEYWORD] Trying keyword #{keyword_index + 1}/{len(keyword_array)}: '{area_keyword_item}'")
 
-            is_price_assign_by_bot = await nodriver_ticketplus_unified_select(tab, config_dict, area_keyword_item)
+            is_last_keyword = keyword_index == len(keyword_array) - 1
+            is_price_assign_by_bot = await nodriver_ticketplus_unified_select(
+                tab, config_dict, area_keyword_item,
+                allow_fallback=area_auto_fallback and is_last_keyword)
 
             if is_price_assign_by_bot:
                 keyword_matched = True
@@ -2870,44 +2920,46 @@ async def nodriver_ticketplus_order_exclusive_code(tab, config_dict, fail_list):
                     return (box.textContent || '').trim();
                 }}
 
+                function chooseFor(labelText, singleBox) {{
+                    if (singleBox && configured.length === 1) {{
+                        // Unambiguous: one box, one value. No wording involved.
+                        return configured[0];
+                    }}
+                    let chosen = null;
+                    const wantsCard = cardKeywords.some(function (k) {{ return labelText.indexOf(k) >= 0; }});
+                    const wantsSerial = serialKeywords.some(function (k) {{ return labelText.indexOf(k) >= 0; }});
+                    if (wantsCard) chosen = configured.find(function (c) {{ return c.kind === 'card'; }}) || null;
+                    else if (wantsSerial) chosen = configured.find(function (c) {{ return c.kind === 'serial'; }}) || null;
+                    // Nothing in the wording matched. Filling the wrong value is
+                    // recoverable (the site rejects it); filling nothing means the button
+                    // stays disabled forever. So always fall back to a configured value,
+                    // preferring the general-purpose code field.
+                    if (!chosen) {{
+                        chosen = configured.find(function (c) {{ return c.kind === 'serial'; }})
+                                 || configured[0] || null;
+                    }}
+                    return chosen;
+                }}
+
                 // Scope to .exclusive-code: the page has plenty of other text inputs (search,
-                // login) that must never be typed into.
+                // login) that must never be typed into. Inside the box, take any typeable
+                // input rather than only type="text": a digits-only card prefix is a natural
+                // candidate for type="tel"/"number", and that switch alone would hide the box.
+                const typeable = 'input:not([type]), input[type="text"], input[type="tel"], ' +
+                                 'input[type="number"], input[type="search"]';
                 const boxes = document.querySelectorAll('.exclusive-code');
                 const targets = [];
                 for (let i = 0; i < boxes.length; i++) {{
-                    const inputs = boxes[i].querySelectorAll('input[type="text"]');
+                    const inputs = boxes[i].querySelectorAll(typeable);
                     for (let j = 0; j < inputs.length; j++) {{
                         if (!inputs[j].value) targets.push(inputs[j]);
                     }}
                 }}
 
-                if (targets.length === 0) {{
-                    return {{ success: false, filledCount: 0, filled: [], skipped: [],
-                             message: 'no empty code input' }};
-                }}
-
                 for (let i = 0; i < targets.length; i++) {{
                     const input = targets[i];
                     const labelText = labelFor(input);
-                    let chosen = null;
-
-                    if (targets.length === 1 && configured.length === 1) {{
-                        // Unambiguous: one box, one value. No wording involved.
-                        chosen = configured[0];
-                    }} else {{
-                        const wantsCard = cardKeywords.some(function (k) {{ return labelText.indexOf(k) >= 0; }});
-                        const wantsSerial = serialKeywords.some(function (k) {{ return labelText.indexOf(k) >= 0; }});
-                        if (wantsCard) chosen = configured.find(function (c) {{ return c.kind === 'card'; }}) || null;
-                        else if (wantsSerial) chosen = configured.find(function (c) {{ return c.kind === 'serial'; }}) || null;
-                        // Nothing in the wording matched. Filling the wrong value is
-                        // recoverable (the site rejects it); filling nothing means the button
-                        // stays disabled forever. So always fall back to a configured value,
-                        // preferring the general-purpose code field.
-                        if (!chosen) {{
-                            chosen = configured.find(function (c) {{ return c.kind === 'serial'; }})
-                                     || configured[0] || null;
-                        }}
-                    }}
+                    const chosen = chooseFor(labelText, targets.length === 1);
 
                     if (!chosen) {{
                         skipped.push({{ label: labelText.slice(0, 40) }});
@@ -2918,29 +2970,84 @@ async def nodriver_ticketplus_order_exclusive_code(tab, config_dict, fail_list):
                     input.dispatchEvent(new Event('input', {{ bubbles: true }}));
                     input.dispatchEvent(new Event('change', {{ bubbles: true }}));
                     filledCount++;
-                    filled.push({{ kind: chosen.kind, label: labelText.slice(0, 40) }});
+                    filled.push({{ kind: chosen.kind, label: labelText.slice(0, 40), via: 'box' }});
                 }}
 
-                return {{
-                    success: filledCount > 0,
+                // Second layer: the field the site actually submits. The order page posts its
+                // own `serialNumber` with the enqueue request; the box is only how a person
+                // reaches it, and the next button does not wait for it - pressing next with it
+                // empty just scrolls back to the box, so a box we cannot see turns into a
+                // silent loop of presses that never submit. Whatever the markup looks like, the
+                // component flags `hasSerial` once a code-gated ticket is chosen, so fill the
+                // value there and read it back. This also catches a typed value that the
+                // component did not pick up.
+                const vue = {{ state: 'absent' }};
+                try {{
+                    const root = document.querySelector('#app');
+                    const vm = root && root.__vue__;
+                    let stack = vm ? [vm] : [], guard = 0, host = null;
+                    // Breadth-first, stopping at the first component that has the fields: that
+                    // is the order page that owns the submit. The ticket lists below it share
+                    // the names, but their copy is never posted - so when the order page says
+                    // no code is needed, that is the answer, not a cue to keep looking.
+                    while (stack.length && guard++ < 400) {{
+                        const cur = stack.shift();
+                        if (cur && typeof cur === 'object' && 'serialNumber' in cur && 'hasSerial' in cur) {{
+                            host = cur;
+                            break;
+                        }}
+                        if (cur && cur.$children) stack = stack.concat(cur.$children);
+                    }}
+                    if (!host) {{
+                        vue.state = 'absent';
+                    }} else if (host.hasSerial !== true) {{
+                        vue.state = 'not-required';
+                    }} else if (String(host.serialNumber || '') !== '') {{
+                        vue.state = 'already';
+                    }} else {{
+                        const label = String(host.hint ||
+                            (host.SNDescription && host.SNDescription.title) || '');
+                        const chosen = chooseFor(label, true);
+                        if (!chosen) {{
+                            vue.state = 'no-value';
+                        }} else {{
+                            host.serialNumber = chosen.value;
+                            if (String(host.serialNumber || '') === chosen.value) {{
+                                vue.state = 'filled';
+                                filledCount++;
+                                filled.push({{ kind: chosen.kind, label: label.slice(0, 40), via: 'vue' }});
+                            }} else {{
+                                vue.state = 'refused';
+                            }}
+                        }}
+                    }}
+                }} catch (e) {{
+                    vue.state = 'error';
+                }}
+
+                return JSON.stringify({{
+                    success: filledCount > 0 || vue.state === 'already',
                     filledCount: filledCount,
                     filled: filled,
-                    skipped: skipped
-                }};
+                    skipped: skipped,
+                    boxes: boxes.length,
+                    vue: vue.state,
+                    message: targets.length ? '' : 'no empty code input'
+                }});
             }})()
         ''')
 
-        if result:
-            if isinstance(result, dict):
-                success = result.get('success', False)
-                filled_count = result.get('filledCount', 0)
-            else:
-                debug.log(f"[DISCOUNT CODE] Unexpected result type: {type(result)}, value: {result}")
-                success = True
-                filled_count = 1
+        result = util.parse_nodriver_result(result)
+        if isinstance(result, str):
+            try:
+                result = json.loads(result)
+            except Exception:
+                result = None
 
+        if isinstance(result, dict):
             filled = result.get('filled') or []
             skipped = result.get('skipped') or []
+            vue_state = result.get('vue')
 
             for item in skipped:
                 if isinstance(item, dict):
@@ -2950,15 +3057,33 @@ async def nodriver_ticketplus_order_exclusive_code(tab, config_dict, fail_list):
                         "or Settings -> contact -> credit_card_prefix."
                     )
 
-            if success and filled_count > 0:
-                for item in filled:
-                    if isinstance(item, dict):
-                        what = "card prefix" if item.get('kind') == 'card' else "serial"
-                        debug.log(f"[DISCOUNT CODE] Filled {what} into '{item.get('label')}'")
-                debug.log(f"[DISCOUNT CODE] Successfully filled {filled_count} field(s)")
+            for item in filled:
+                if not isinstance(item, dict):
+                    continue
+                what = "card prefix" if item.get('kind') == 'card' else "serial"
+                if item.get('via') == 'vue':
+                    # The box was not found or did not take the value, but the site asked for
+                    # a code. Worth seeing outside debug mode: it means the page changed.
+                    print(f"[DISCOUNT CODE] Code box not recognised on the page; filled the {what} "
+                          "into the order form's own field instead")
+                else:
+                    debug.log(f"[DISCOUNT CODE] Filled {what} into '{item.get('label')}'")
+
+            if vue_state in ('refused', 'error') and not _state.get("code_fill_warned"):
+                _state["code_fill_warned"] = True
+                print(f"[DISCOUNT CODE] The order form refused the code ({vue_state}); "
+                      "type it into the box by hand if the next step does not go through")
+
+            debug.log(f"[DISCOUNT CODE] boxes={result.get('boxes')} filled={result.get('filledCount', 0)} "
+                      f"form={vue_state}")
+
+            if result.get('success'):
                 return True, fail_list, False
 
-        debug.log(f"[DISCOUNT CODE] Nothing filled ({result.get('message') if isinstance(result, dict) else 'no result'})")
+            debug.log(f"[DISCOUNT CODE] Nothing filled ({result.get('message') or vue_state})")
+            return False, fail_list, False
+
+        debug.log(f"[DISCOUNT CODE] Unexpected result: {result}")
         return False, fail_list, False
 
     except Exception as e:
