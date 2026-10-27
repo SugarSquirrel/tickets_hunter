@@ -32,6 +32,7 @@ import urllib.parse
 
 import util
 import settings
+from flow_timing import flow_stage
 from NonBrowser import NonBrowser
 
 try:
@@ -849,11 +850,16 @@ async def main(args):
         if 'cityline.com/Login.html' in url:
             cloudflare_checked = True
         if not cloudflare_checked and cloudflare_fail_count < 3:
-            is_cloudflare = await detect_cloudflare_challenge(tab, show_debug=config_dict.get("advanced", {}).get("verbose", False))
+            timing_config = config_dict if ('tixcraft.com' in url or 'indievox.com' in url) else None
+            with flow_stage(timing_config, "cloudflare_check") as timing:
+                is_cloudflare = await detect_cloudflare_challenge(tab, show_debug=config_dict.get("advanced", {}).get("verbose", False))
+                timing.outcome = "challenge" if is_cloudflare else "clear"
             cloudflare_checked = True
             if is_cloudflare:
                 print("[CLOUDFLARE] Challenge page detected, attempting to solve...")
-                cf_result = await handle_cloudflare_challenge(tab, config_dict)
+                with flow_stage(timing_config, "cloudflare_handle") as timing:
+                    cf_result = await handle_cloudflare_challenge(tab, config_dict)
+                    timing.outcome = "handled" if cf_result else "not_handled"
                 if cf_result:
                     cloudflare_checked = False  # Re-check after successful handling
                     cloudflare_fail_count = 0

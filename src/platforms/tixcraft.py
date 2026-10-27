@@ -23,6 +23,14 @@ except Exception:
 from zendriver import cdp
 
 import util
+from flow_timing import flow_stage
+from tixcraft_readiness import (
+    navigate_date,
+    read_document,
+    supported_url,
+    ticket_document_matches,
+    wait_ticket_select,
+)
 from nodriver_common import (
     check_and_handle_pause,
     fetch_notification_extras,
@@ -1464,12 +1472,15 @@ async def nodriver_tixcraft_date_auto_select(tab, url, config_dict, domain_name)
         # 注意：從 /activity/detail/ redirect 過來時，redirect 函數已經等待過了
         # 這裡再等待一次是為了處理直接進入 /activity/game/ 頁面的情況
         try:
-            await tab.wait_for('#gameList > table > tbody > tr', timeout=3)
+            with flow_stage(config_dict, "date_rows_wait") as timing:
+                await tab.wait_for('#gameList > table > tbody > tr', timeout=3)
         except:
             pass  # timeout 沒關係，繼續嘗試讀取
 
         try:
-            area_list = await tab.query_selector_all('#gameList > table > tbody > tr')
+            with flow_stage(config_dict, "date_rows_observe") as timing:
+                area_list = await tab.query_selector_all('#gameList > table > tbody > tr')
+                timing.outcome = "found" if area_list else "missing"
         except:
             pass
 
@@ -1490,161 +1501,166 @@ async def nodriver_tixcraft_date_auto_select(tab, url, config_dict, domain_name)
 
     coming_soon_condictions_list = coming_soon_conditions.get(html_lang, coming_soon_conditions['en-US'])
 
-    matched_blocks = None
-    formated_area_list = None
+    with flow_stage(config_dict, "date_scan") as timing:
+        matched_blocks = None
+        formated_area_list = None
 
-    if area_list and len(area_list) > 0:
-        formated_area_list = []
-        formated_area_list_text = []
-        # Batch fetch all row HTML in one CDP round-trip (~9-16x faster than sequential get_html())
-        all_row_htmls = None
-        try:
-            all_row_htmls = await tab.evaluate(
-                "Array.from(document.querySelectorAll('#gameList > table > tbody > tr')).map(r => r.outerHTML)"
-            )
-        except:
-            pass
-        for i, row in enumerate(area_list):
+        if area_list and len(area_list) > 0:
+            formated_area_list = []
+            formated_area_list_text = []
+            # Batch fetch all row HTML in one CDP round-trip (~9-16x faster than sequential get_html())
+            all_row_htmls = None
             try:
-                if all_row_htmls and i < len(all_row_htmls):
-                    row_html = all_row_htmls[i]
-                else:
-                    row_html = await row.get_html()
-                row_text = util.remove_html_tags(row_html)
+                all_row_htmls = await tab.evaluate(
+                    "Array.from(document.querySelectorAll('#gameList > table > tbody > tr')).map(r => r.outerHTML)"
+                )
             except:
-                break
-
-            if row_text and not util.reset_row_text_if_match_keyword_exclude(config_dict, row_text):
-                # Check coming soon
-                if all(cond in row_text for cond in coming_soon_condictions_list):
-                    is_coming_soon = True
-                    debug.log(f"[DATE SELECT] Detected coming soon countdown")
-                    if auto_reload_coming_soon_page_enable:
-                        debug.log(f"[DATE SELECT] auto_reload_coming_soon_page=true, will reload and retry")
-                        break
+                pass
+            for i, row in enumerate(area_list):
+                try:
+                    if all_row_htmls and i < len(all_row_htmls):
+                        row_html = all_row_htmls[i]
                     else:
-                        # Skip this row (don't add to formated_area_list)
-                        continue
+                        row_html = await row.get_html()
+                    row_text = util.remove_html_tags(row_html)
+                except:
+                    break
 
-                # Check if row has ticket text
-                row_is_enabled = any(text in row_text for text in find_ticket_text_list)
-
-                # Check sold out
-                if row_is_enabled and pass_date_is_sold_out_enable:
-                    for sold_out_item in sold_out_text_list:
-                        if sold_out_item in row_text[-(len(sold_out_item)+5):]:
-                            row_is_enabled = False
-                            # 移除：售完訊息過度詳細
+                if row_text and not util.reset_row_text_if_match_keyword_exclude(config_dict, row_text):
+                    # Check coming soon
+                    if all(cond in row_text for cond in coming_soon_condictions_list):
+                        is_coming_soon = True
+                        debug.log(f"[DATE SELECT] Detected coming soon countdown")
+                        if auto_reload_coming_soon_page_enable:
+                            debug.log(f"[DATE SELECT] auto_reload_coming_soon_page=true, will reload and retry")
                             break
+                        else:
+                            # Skip this row (don't add to formated_area_list)
+                            continue
 
-                if row_is_enabled:
-                    formated_area_list.append(row)
-                    formated_area_list_text.append(row_text)
-                    # 移除：可用場次訊息過度詳細
+                    # Check if row has ticket text
+                    row_is_enabled = any(text in row_text for text in find_ticket_text_list)
 
-        # T004-T008: NEW LOGIC - Early return pattern (Feature 003)
-        # Keyword priority matching: first match wins and stops immediately
-        if not date_keyword:
-            matched_blocks = formated_area_list
-            debug.log(f"[DATE KEYWORD] No keyword specified, using all {len(formated_area_list)} dates")
-        else:
-            # NEW: Early return pattern - iterate keywords in order
-            matched_blocks = []
-            target_row_found = False
-            keyword_matched_index = -1
+                    # Check sold out
+                    if row_is_enabled and pass_date_is_sold_out_enable:
+                        for sold_out_item in sold_out_text_list:
+                            if sold_out_item in row_text[-(len(sold_out_item)+5):]:
+                                row_is_enabled = False
+                                # 移除：售完訊息過度詳細
+                                break
 
-            try:
-                import json
-                import re
-                keyword_array = json.loads("[" + date_keyword + "]")
+                    if row_is_enabled:
+                        formated_area_list.append(row)
+                        formated_area_list_text.append(row_text)
+                        # 移除：可用場次訊息過度詳細
 
-                # T005: Start checking keywords log
-                debug.log(f"[DATE KEYWORD] Start checking keywords in order: {keyword_array}")
-                debug.log(f"[DATE KEYWORD] Total keyword groups: {len(keyword_array)}")
-                debug.log(f"[DATE KEYWORD] Checking against {len(formated_area_list_text)} available dates...")
-
-                # NEW: Iterate keywords in priority order (early return)
-                for keyword_index, keyword_item_set in enumerate(keyword_array):
-                    debug.log(f"[DATE KEYWORD] Checking keyword #{keyword_index + 1}: {keyword_item_set}")
-
-                    # Check all rows for this keyword
-                    for i, row_text in enumerate(formated_area_list_text):
-                        normalized_row_text = re.sub(r'\s+', ' ', row_text)
-                        is_match = False
-
-                        if isinstance(keyword_item_set, str):
-                            # OR logic: single keyword
-                            normalized_keyword = re.sub(r'\s+', ' ', keyword_item_set)
-                            is_match = normalized_keyword in normalized_row_text
-                        elif isinstance(keyword_item_set, list):
-                            # AND logic: all keywords must match
-                            normalized_keywords = [re.sub(r'\s+', ' ', kw) for kw in keyword_item_set]
-                            match_results = [kw in normalized_row_text for kw in normalized_keywords]
-                            is_match = all(match_results)
-
-                        if is_match:
-                            # T006: Keyword matched log - IMMEDIATELY select and stop
-                            matched_blocks = [formated_area_list[i]]
-                            target_row_found = True
-                            keyword_matched_index = keyword_index
-                            debug.log(f"[DATE KEYWORD] Keyword #{keyword_index + 1} matched: '{keyword_item_set}'")
-                            debug.log(f"[DATE SELECT] Selected date: {row_text[:80]} (keyword match)")
-                            break
-
-                    if target_row_found:
-                        # EARLY RETURN: Stop checking further keywords
-                        break
-
-                # T007: All keywords failed log
-                if not target_row_found:
-                    debug.log(f"[DATE KEYWORD] All keywords failed to match")
-
-            except Exception as e:
-                debug.log(f"[DATE KEYWORD] Parsing error: {e}")
-                # On error, use mode selection
+            # T004-T008: NEW LOGIC - Early return pattern (Feature 003)
+            # Keyword priority matching: first match wins and stops immediately
+            if not date_keyword:
+                matched_blocks = formated_area_list
+                debug.log(f"[DATE KEYWORD] No keyword specified, using all {len(formated_area_list)} dates")
+            else:
+                # NEW: Early return pattern - iterate keywords in order
                 matched_blocks = []
+                target_row_found = False
+                keyword_matched_index = -1
 
-    # T018-T020: NEW - Conditional fallback based on date_auto_fallback switch
-    if matched_blocks is not None and len(matched_blocks) == 0 and date_keyword and formated_area_list is not None and len(formated_area_list) > 0:
-        if date_auto_fallback:
-            # T018: Fallback enabled - use auto_select_mode
-            debug.log(f"[DATE FALLBACK] date_auto_fallback=true, triggering auto fallback")
-            debug.log(f"[DATE FALLBACK] Selecting available date based on date_select_order='{auto_select_mode}'")
-            matched_blocks = formated_area_list
+                try:
+                    import json
+                    import re
+                    keyword_array = json.loads("[" + date_keyword + "]")
+
+                    # T005: Start checking keywords log
+                    debug.log(f"[DATE KEYWORD] Start checking keywords in order: {keyword_array}")
+                    debug.log(f"[DATE KEYWORD] Total keyword groups: {len(keyword_array)}")
+                    debug.log(f"[DATE KEYWORD] Checking against {len(formated_area_list_text)} available dates...")
+
+                    # NEW: Iterate keywords in priority order (early return)
+                    for keyword_index, keyword_item_set in enumerate(keyword_array):
+                        debug.log(f"[DATE KEYWORD] Checking keyword #{keyword_index + 1}: {keyword_item_set}")
+
+                        # Check all rows for this keyword
+                        for i, row_text in enumerate(formated_area_list_text):
+                            normalized_row_text = re.sub(r'\s+', ' ', row_text)
+                            is_match = False
+
+                            if isinstance(keyword_item_set, str):
+                                # OR logic: single keyword
+                                normalized_keyword = re.sub(r'\s+', ' ', keyword_item_set)
+                                is_match = normalized_keyword in normalized_row_text
+                            elif isinstance(keyword_item_set, list):
+                                # AND logic: all keywords must match
+                                normalized_keywords = [re.sub(r'\s+', ' ', kw) for kw in keyword_item_set]
+                                match_results = [kw in normalized_row_text for kw in normalized_keywords]
+                                is_match = all(match_results)
+
+                            if is_match:
+                                # T006: Keyword matched log - IMMEDIATELY select and stop
+                                matched_blocks = [formated_area_list[i]]
+                                target_row_found = True
+                                keyword_matched_index = keyword_index
+                                debug.log(f"[DATE KEYWORD] Keyword #{keyword_index + 1} matched: '{keyword_item_set}'")
+                                debug.log(f"[DATE SELECT] Selected date: {row_text[:80]} (keyword match)")
+                                break
+
+                        if target_row_found:
+                            # EARLY RETURN: Stop checking further keywords
+                            break
+
+                    # T007: All keywords failed log
+                    if not target_row_found:
+                        debug.log(f"[DATE KEYWORD] All keywords failed to match")
+
+                except Exception as e:
+                    timing.outcome = "error"
+                    debug.log(f"[DATE KEYWORD] Parsing error: {e}")
+                    # On error, use mode selection
+                    matched_blocks = []
+
+        # T018-T020: NEW - Conditional fallback based on date_auto_fallback switch
+        if matched_blocks is not None and len(matched_blocks) == 0 and date_keyword and formated_area_list is not None and len(formated_area_list) > 0:
+            if date_auto_fallback:
+                # T018: Fallback enabled - use auto_select_mode
+                debug.log(f"[DATE FALLBACK] date_auto_fallback=true, triggering auto fallback")
+                debug.log(f"[DATE FALLBACK] Selecting available date based on date_select_order='{auto_select_mode}'")
+                matched_blocks = formated_area_list
+            else:
+                # T019: Fallback disabled - strict mode (no selection, but still reload)
+                debug.log(f"[DATE FALLBACK] date_auto_fallback=false, fallback is disabled")
+                debug.log(f"[DATE SELECT] No date selected, will reload page and retry")
+                # Don't return - let reload logic execute below
+                # matched_blocks remains None (no selection will be made)
+
+        # T020: Handle case when formated_area_list is empty or None (all options excluded or sold out)
+        if formated_area_list is None or len(formated_area_list) == 0:
+            debug.log(f"[DATE FALLBACK] No available options after exclusion")
+            debug.log(f"[DATE SELECT] Will reload page and retry")
+            # Don't return - let reload logic execute at function end
+            is_date_clicked = False
+            target_area = None  # Skip selection when no options available
+        elif matched_blocks is None or len(matched_blocks) == 0:
+            # matched_blocks is None when fallback=false and keyword didn't match
+            target_area = None
+            is_date_clicked = False
         else:
-            # T019: Fallback disabled - strict mode (no selection, but still reload)
-            debug.log(f"[DATE FALLBACK] date_auto_fallback=false, fallback is disabled")
-            debug.log(f"[DATE SELECT] No date selected, will reload page and retry")
-            # Don't return - let reload logic execute below
-            # matched_blocks remains None (no selection will be made)
+            target_area = util.get_target_item_from_matched_list(matched_blocks, auto_select_mode)
 
-    # T020: Handle case when formated_area_list is empty or None (all options excluded or sold out)
-    if formated_area_list is None or len(formated_area_list) == 0:
-        debug.log(f"[DATE FALLBACK] No available options after exclusion")
-        debug.log(f"[DATE SELECT] Will reload page and retry")
-        # Don't return - let reload logic execute at function end
-        is_date_clicked = False
-        target_area = None  # Skip selection when no options available
-    elif matched_blocks is None or len(matched_blocks) == 0:
-        # matched_blocks is None when fallback=false and keyword didn't match
-        target_area = None
-        is_date_clicked = False
-    else:
-        target_area = util.get_target_item_from_matched_list(matched_blocks, auto_select_mode)
+        if debug.enabled:
+            if target_area and matched_blocks:
+                # Find which index was selected
+                try:
+                    target_index = matched_blocks.index(target_area) if target_area in matched_blocks else -1
+                    debug.log(f"[DATE SELECT] Auto-select mode: {auto_select_mode}")
+                    debug.log(f"[DATE SELECT] Selected target: #{target_index + 1}/{len(matched_blocks)}")
+                except:
+                    debug.log(f"[DATE SELECT] Auto-select mode: {auto_select_mode}")
+                    debug.log(f"[DATE SELECT] Target selected from {len(matched_blocks)} matched dates")
+            elif not matched_blocks or len(matched_blocks) == 0:
+                debug.log(f"[DATE SELECT] No target selected (matched_blocks is empty)")
 
-    if debug.enabled:
-        if target_area and matched_blocks:
-            # Find which index was selected
-            try:
-                target_index = matched_blocks.index(target_area) if target_area in matched_blocks else -1
-                debug.log(f"[DATE SELECT] Auto-select mode: {auto_select_mode}")
-                debug.log(f"[DATE SELECT] Selected target: #{target_index + 1}/{len(matched_blocks)}")
-            except:
-                debug.log(f"[DATE SELECT] Auto-select mode: {auto_select_mode}")
-                debug.log(f"[DATE SELECT] Target selected from {len(matched_blocks)} matched dates")
-        elif not matched_blocks or len(matched_blocks) == 0:
-            debug.log(f"[DATE SELECT] No target selected (matched_blocks is empty)")
-
+        if timing.outcome != "error":
+            timing.outcome = "matched" if target_area else "no_match"
+        timing.count = len(matched_blocks) if matched_blocks else 0
     is_date_clicked = False
 
     # 移除：內部選擇細節過度詳細
@@ -1658,14 +1674,18 @@ async def nodriver_tixcraft_date_auto_select(tab, url, config_dict, domain_name)
 
             # Method 1: button[data-href] within target_area (tixcraft/indievox specific)
             # 使用 NoDriver Element API 取得 data-href
-            button_with_href = await target_area.query_selector('button[data-href]')
-            data_href = None
+            with flow_stage(config_dict, "date_target_lookup") as timing:
+                button_with_href = await target_area.query_selector('button[data-href]')
+                data_href = None
+                timing.outcome = "found" if button_with_href else "missing"
             if button_with_href:
                 # 更新元素以確保屬性載入
-                await button_with_href.update()
-                button_attrs = button_with_href.attrs or {}
-                data_href = button_attrs.get('data-href')
+                with flow_stage(config_dict, "date_target_update") as timing:
+                    await button_with_href.update()
+                    button_attrs = button_with_href.attrs or {}
+                    data_href = button_attrs.get('data-href')
 
+                    timing.outcome = "found" if data_href else "missing"
                 if debug.enabled:
                     if data_href:
                         debug.log(f"[DATE SELECT] button[data-href] found in target_area: {data_href}")
@@ -1674,7 +1694,10 @@ async def nodriver_tixcraft_date_auto_select(tab, url, config_dict, domain_name)
 
                 if data_href:
                     debug.log("[DATE SELECT] Navigating via button[data-href]...")
-                    await tab.get(data_href)
+                    with flow_stage(config_dict, "date_navigation") as timing:
+                        navigation_outcome = await navigate_date(
+                            tab, data_href, url, config_dict, cdp.page.navigate)
+                        timing.outcome = navigation_outcome
                     is_date_clicked = True
                     click_method_used = "button[data-href]"
                     debug.log("[DATE SELECT] Successfully navigated via button[data-href]")
@@ -1692,7 +1715,8 @@ async def nodriver_tixcraft_date_auto_select(tab, url, config_dict, domain_name)
                 link = await target_area.query_selector('a[href]')
                 if link:
                     debug.log("[DATE SELECT] Link found in target_area, clicking...")
-                    await link.click()
+                    with flow_stage(config_dict, "date_navigation"):
+                        await link.click()
                     is_date_clicked = True
                     click_method_used = "link <a[href]>"
                     debug.log("[DATE SELECT] Successfully clicked via link")
@@ -1703,7 +1727,8 @@ async def nodriver_tixcraft_date_auto_select(tab, url, config_dict, domain_name)
                     button = await target_area.query_selector('button')
                     if button:
                         debug.log("[DATE SELECT] Regular button found in target_area, clicking...")
-                        await button.click()
+                        with flow_stage(config_dict, "date_navigation"):
+                            await button.click()
                         is_date_clicked = True
                         click_method_used = "regular button"
                         debug.log("[DATE SELECT] Successfully clicked via regular button")
@@ -1772,7 +1797,9 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
     area_auto_fallback = config_dict.get('area_auto_fallback', False)  # T021: Safe access for new field
 
     try:
-        el = await tab.query_selector('.zone')
+        with flow_stage(config_dict, "area_observe") as timing:
+            el = await tab.query_selector('.zone')
+            timing.outcome = "found" if el else "missing"
     except:
         return
 
@@ -1798,7 +1825,10 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
         for keyword_index, area_keyword_item in enumerate(area_keyword_array):
             debug.log(f"[AREA KEYWORD] Checking keyword #{keyword_index + 1}: {area_keyword_item}")
 
-            is_need_refresh, matched_blocks = await nodriver_get_tixcraft_target_area(tab, el, config_dict, area_keyword_item)
+            with flow_stage(config_dict, "area_scan", priority=keyword_index + 1) as timing:
+                is_need_refresh, matched_blocks = await nodriver_get_tixcraft_target_area(tab, el, config_dict, area_keyword_item)
+                timing.outcome = "matched" if matched_blocks else "no_match"
+                timing.count = len(matched_blocks) if matched_blocks else 0
 
             if not is_need_refresh:
                 # T013: Keyword matched log
@@ -1817,7 +1847,10 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
                 # T022: Fallback enabled - use auto_select_mode without keyword
                 debug.log(f"[AREA FALLBACK] area_auto_fallback=true, triggering auto fallback")
                 debug.log(f"[AREA FALLBACK] Selecting available area based on area_select_order='{auto_select_mode}'")
-                is_need_refresh, matched_blocks = await nodriver_get_tixcraft_target_area(tab, el, config_dict, "")
+                with flow_stage(config_dict, "area_fallback_scan") as timing:
+                    is_need_refresh, matched_blocks = await nodriver_get_tixcraft_target_area(tab, el, config_dict, "")
+                    timing.outcome = "matched" if matched_blocks else "no_match"
+                    timing.count = len(matched_blocks) if matched_blocks else 0
                 is_fallback_selection = True  # Mark as fallback selection
             else:
                 # T023: Fallback disabled - strict mode (no selection, but still reload)
@@ -1827,7 +1860,10 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
                 # matched_blocks remains None (no selection will be made)
                 # is_need_refresh remains True (will trigger reload)
     else:
-        is_need_refresh, matched_blocks = await nodriver_get_tixcraft_target_area(tab, el, config_dict, "")
+        with flow_stage(config_dict, "area_scan", priority=0) as timing:
+            is_need_refresh, matched_blocks = await nodriver_get_tixcraft_target_area(tab, el, config_dict, "")
+            timing.outcome = "matched" if matched_blocks else "no_match"
+            timing.count = len(matched_blocks) if matched_blocks else 0
         # No keyword specified, treat as mode-based selection (similar to fallback)
         if not area_keyword:
             is_fallback_selection = True
@@ -1875,12 +1911,14 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
         if target_element is not None:
             # Fallback path: we have a real Element, click it directly.
             try:
-                await target_element.click()
+                with flow_stage(config_dict, "area_click_dispatch"):
+                    await target_element.click()
                 log_timing("T_area_clicked", _timing_state, config_dict)
                 click_done = True
             except:
                 try:
-                    await target_element.evaluate('el => el.click()')
+                    with flow_stage(config_dict, "area_click_dispatch"):
+                        await target_element.evaluate('el => el.click()')
                     log_timing("T_area_clicked", _timing_state, config_dict)
                     click_done = True
                 except:
@@ -1891,12 +1929,13 @@ async def nodriver_tixcraft_area_auto_select(tab, url, config_dict):
             # Single tab.evaluate call — far cheaper than materialising N
             # Element wrappers just to call one .click() on one of them.
             try:
-                await tab.evaluate(
-                    "(function(){"
-                    "var els=document.querySelectorAll('.zone a');"
-                    f"if(els && els[{target_index_0}]) els[{target_index_0}].click();"
-                    "})();"
-                )
+                with flow_stage(config_dict, "area_click_dispatch") as timing:
+                    await tab.evaluate(
+                        "(function(){"
+                        "var els=document.querySelectorAll('.zone a');"
+                        f"if(els && els[{target_index_0}]) els[{target_index_0}].click();"
+                        "})();"
+                    )
                 log_timing("T_area_clicked", _timing_state, config_dict)
             except:
                 pass
@@ -2377,14 +2416,16 @@ async def nodriver_tixcraft_assign_ticket_number(tab, config_dict):
     """
     # 函數開始時檢查暫停
     if await check_and_handle_pause(config_dict):
-        return False
+        return False, None, None
 
     debug = util.create_debug_logger(config_dict)
     is_ticket_number_assigned = False
 
     # 等待票券選擇器出現（智慧等待，取代固定 0.5 秒延遲）
     try:
-        await tab.wait_for('.mobile-select, select[id*="TicketForm_ticketPrice_"]', timeout=2)
+        current_url, _ = await nodriver_current_url(tab)
+        if not await wait_ticket_select(tab, current_url):
+            return False, None, None
         log_timing("T_ticket_select_visible", _timing_state, config_dict)
     except:
         pass  # Continue even if timeout, will try to find selectors below
@@ -2622,6 +2663,15 @@ async def nodriver_tixcraft_ticket_main(tab, config_dict, ocr, Captcha_Browser, 
 
     # 檢查是否已經設定過票券數量（方案 B：狀態標記）
     current_url, _ = await nodriver_current_url(tab)
+    ticket_document = None
+    if supported_url(current_url):
+        with flow_stage(config_dict, "ticket_document_guard") as timing:
+            ticket_document = await read_document(tab)
+            if not ticket_document_matches(ticket_document, current_url):
+                timing.outcome = "document_changed"
+                debug.log("[TICKET SELECT] Document left ticket page, returning to route dispatch")
+                return
+            timing.outcome = "current" if ticket_document is not None else "unavailable"
     ticket_number = str(config_dict["ticket_number"])
     ticket_state_key = f"ticket_assigned_{current_url}_{ticket_number}"
 
@@ -2662,14 +2712,17 @@ async def nodriver_tixcraft_ticket_main(tab, config_dict, ocr, Captcha_Browser, 
     prefill_done = False
     if config_dict.get("advanced", {}).get("prefill_script_enable", True):
         try:
-            prefill_raw = await tab.evaluate("!!window.__TH_PREFILL_DONE__")
-            prefill_done = bool(util.parse_nodriver_result(prefill_raw))
+            with flow_stage(config_dict, "prefill_marker_observe") as timing:
+                prefill_raw = await tab.evaluate("!!window.__TH_PREFILL_DONE__")
+                prefill_done = bool(util.parse_nodriver_result(prefill_raw))
+                timing.outcome = "found" if prefill_done else "missing"
         except Exception:
             prefill_done = False
 
     if prefill_done:
         try:
-            verify_raw = await tab.evaluate('''
+            with flow_stage(config_dict, "prefill_verify") as timing:
+                verify_raw = await tab.evaluate('''
                 (function() {
                     var selects = document.querySelectorAll('.mobile-select, select[id*="TicketForm_ticketPrice_"]');
                     for (var i = 0; i < selects.length; i++) {
@@ -2686,7 +2739,10 @@ async def nodriver_tixcraft_ticket_main(tab, config_dict, ocr, Captcha_Browser, 
                     return { ticket_set: false };
                 })();
             ''')
-            verify_result = util.parse_nodriver_result(verify_raw)
+                verify_result = util.parse_nodriver_result(verify_raw)
+                timing.outcome = ("verified" if isinstance(verify_result, dict)
+                    and verify_result.get("ticket_set") and verify_result.get("agree_checked")
+                    else "not_verified")
         except Exception as exc:
             debug.log(f"[PREFILL] Verify call failed (non-fatal): {exc}")
             verify_result = None
@@ -2706,19 +2762,25 @@ async def nodriver_tixcraft_ticket_main(tab, config_dict, ocr, Captcha_Browser, 
         else:
             debug.log(f"[PREFILL] Marker found but verification failed (result={verify_result}), falling back to bot setters")
 
-    # Always check agreement checkbox in NoDriver mode
-    await nodriver_tixcraft_ticket_main_agree(tab, config_dict)
+    with flow_stage(config_dict, "ticket_prepare") as timing:
+        # Always check agreement checkbox in NoDriver mode
+        await nodriver_tixcraft_ticket_main_agree(tab, config_dict)
 
-    is_ticket_number_assigned = False
+        is_ticket_number_assigned = False
 
-    # PS: some events on tixcraft have multi <select>.
-    # Fix Issue #200/#201: Now returns select_id for correct element targeting
-    is_ticket_number_assigned, select_obj, select_id = await nodriver_tixcraft_assign_ticket_number(tab, config_dict)
+        # PS: some events on tixcraft have multi <select>.
+        # Fix Issue #200/#201: Now returns select_id for correct element targeting
+        is_ticket_number_assigned, select_obj, select_id = await nodriver_tixcraft_assign_ticket_number(tab, config_dict)
 
-    if not is_ticket_number_assigned:
-        debug.log(f"Setting ticket number: {ticket_number}")
-        is_ticket_number_assigned = await nodriver_ticket_number_select_fill(tab, select_obj, ticket_number, select_id, config_dict)
+        if supported_url(current_url) and not ticket_document_matches(await read_document(tab), current_url, ticket_document):
+            timing.outcome = "document_changed"
+            return
 
+        if not is_ticket_number_assigned:
+            debug.log(f"Setting ticket number: {ticket_number}")
+            is_ticket_number_assigned = await nodriver_ticket_number_select_fill(tab, select_obj, ticket_number, select_id, config_dict)
+
+        timing.outcome = "quantity_set" if is_ticket_number_assigned else "quantity_missing"
     # Record state after successful setting
     if is_ticket_number_assigned:
         _state[ticket_state_key] = True
@@ -2757,6 +2819,8 @@ async def nodriver_tixcraft_ticket_main(tab, config_dict, ocr, Captcha_Browser, 
             interval = config_dict["advanced"].get("auto_reload_page_interval", 0)
             if interval > 0:
                 await asyncio.sleep(interval)
+            if supported_url(current_url) and not ticket_document_matches(await read_document(tab), current_url, ticket_document):
+                return
             mark_bot_reload()
             await tab.reload()
         except Exception as reload_exc:
@@ -2813,30 +2877,32 @@ async def nodriver_tixcraft_keyin_captcha_code(tab, answer="", auto_submit=False
             if answer:
                 debug.log("[TIXCRAFT CAPTCHA] Starting to fill in captcha...")
                 try:
-                    if not is_text_clicked:
-                        await form_verifyCode.click()
+                    with flow_stage(config_dict, "captcha_input_prepare") as timing:
+                        if not is_text_clicked:
+                            await form_verifyCode.click()
 
-                    # 清空並輸入答案
-                    await form_verifyCode.apply('function (element) { element.value = ""; }')
-                    await form_verifyCode.send_keys(answer)
-                    log_timing("T_form_filled", _timing_state, config_dict)
+                        # 清空並輸入答案
+                        await form_verifyCode.apply('function (element) { element.value = ""; }')
+                        await form_verifyCode.send_keys(answer)
+                        log_timing("T_form_filled", _timing_state, config_dict)
 
                     if auto_submit:
-                        # 提交前確認票券數量是否已設定
-                        ticket_number_ok = await tab.evaluate('''
+                        with flow_stage(config_dict, "form_prepare") as timing:
+                            # 提交前確認票券數量是否已設定
+                            ticket_number_ok = await tab.evaluate('''
                             (function() {
                                 const select = document.querySelector('.mobile-select') ||
                                               document.querySelector('select[id*="TicketForm_ticketPrice_"]');
                                 return select && select.value !== "0" && select.value !== "";
                             })();
                         ''')
-                        ticket_number_ok = util.parse_nodriver_result(ticket_number_ok)
+                            ticket_number_ok = util.parse_nodriver_result(ticket_number_ok)
 
-                        if not ticket_number_ok and config_dict:
-                            debug.log("[TIXCRAFT CAPTCHA] Warning: Ticket number not set, resetting...")
-                            # Reset ticket number
-                            ticket_number = str(config_dict.get("ticket_number", 2))
-                            await tab.evaluate(f'''
+                            if not ticket_number_ok and config_dict:
+                                debug.log("[TIXCRAFT CAPTCHA] Warning: Ticket number not set, resetting...")
+                                # Reset ticket number
+                                ticket_number = str(config_dict.get("ticket_number", 2))
+                                await tab.evaluate(f'''
                                 (function() {{
                                     const select = document.querySelector('.mobile-select') ||
                                                   document.querySelector('select[id*="TicketForm_ticketPrice_"]');
@@ -2847,11 +2913,11 @@ async def nodriver_tixcraft_keyin_captcha_code(tab, answer="", auto_submit=False
                                 }})();
                             ''')
 
-                        # 勾選同意條款
-                        await nodriver_check_checkbox_enhanced(tab, '#TicketForm_agree')
+                            # 勾選同意條款
+                            await nodriver_check_checkbox_enhanced(tab, '#TicketForm_agree')
 
-                        # 最終確認所有欄位都已填寫
-                        form_ready = await tab.evaluate('''
+                            # 最終確認所有欄位都已填寫
+                            form_ready = await tab.evaluate('''
                             (function() {
                                 const select = document.querySelector('.mobile-select') ||
                                               document.querySelector('select[id*="TicketForm_ticketPrice_"]');
@@ -2873,12 +2939,15 @@ async def nodriver_tixcraft_keyin_captcha_code(tab, answer="", auto_submit=False
                                 };
                             })();
                         ''')
-                        form_ready = util.parse_nodriver_result(form_ready)
+                            form_ready = util.parse_nodriver_result(form_ready)
 
+                            timing.outcome = "ready" if form_ready.get("ready", False) else "not_ready"
                         if form_ready.get('ready', False):
                             # 提交表單 (按 Enter) - 使用完整的鍵盤事件
-                            await tab.send(cdp.input_.dispatch_key_event("keyDown", code="Enter", key="Enter", text="\r", windows_virtual_key_code=13))
-                            await tab.send(cdp.input_.dispatch_key_event("keyUp", code="Enter", key="Enter", text="\r", windows_virtual_key_code=13))
+                            with flow_stage(config_dict, "submit_input_dispatch") as timing:
+                                await tab.send(cdp.input_.dispatch_key_event("keyDown", code="Enter", key="Enter", text="\r", windows_virtual_key_code=13))
+                                await tab.send(cdp.input_.dispatch_key_event("keyUp", code="Enter", key="Enter", text="\r", windows_virtual_key_code=13))
+                                timing.outcome = "dispatched"
                             log_timing("T_form_submitted", _timing_state, config_dict)
                             is_verifyCode_editing = False
                             is_form_submitted = True
@@ -2967,19 +3036,20 @@ async def nodriver_tixcraft_get_ocr_answer(tab, ocr, ocr_captcha_image_source, C
     if not ocr is None:
         img_base64 = None
 
-        if ocr_captcha_image_source == CONST_OCR_CAPTCH_IMAGE_SOURCE_NON_BROWSER:
-            if not Captcha_Browser is None:
-                img_base64 = base64.b64decode(Captcha_Browser.request_captcha())
+        with flow_stage(config_dict, "ocr_capture") as timing:
+            if ocr_captcha_image_source == CONST_OCR_CAPTCH_IMAGE_SOURCE_NON_BROWSER:
+                if not Captcha_Browser is None:
+                    img_base64 = base64.b64decode(Captcha_Browser.request_captcha())
 
-        if ocr_captcha_image_source == CONST_OCR_CAPTCH_IMAGE_SOURCE_CANVAS:
-            image_id = 'TicketForm_verifyCode-image'
-            if 'indievox.com' in domain_name:
+            if ocr_captcha_image_source == CONST_OCR_CAPTCH_IMAGE_SOURCE_CANVAS:
                 image_id = 'TicketForm_verifyCode-image'
+                if 'indievox.com' in domain_name:
+                    image_id = 'TicketForm_verifyCode-image'
 
-            try:
-                # Stage 7: get captcha image via canvas
-                # async IIFE waits for image load to avoid reading stale image after reload
-                form_verifyCode_base64 = await tab.evaluate(f'''
+                try:
+                    # Stage 7: get captcha image via canvas
+                    # async IIFE waits for image load to avoid reading stale image after reload
+                    form_verifyCode_base64 = await tab.evaluate(f'''
                     (async function() {{
                         var img = document.getElementById('{image_id}');
                         if(!img || !img.src) return null;
@@ -3003,25 +3073,30 @@ async def nodriver_tixcraft_get_ocr_answer(tab, ocr, ocr_captcha_image_source, C
                     }})();
                 ''', await_promise=True)
 
-                if form_verifyCode_base64:
-                    if config_dict is not None:
-                        log_timing("T_captcha_image_ready", _timing_state, config_dict)
-                    img_base64 = base64.b64decode(form_verifyCode_base64.split(',')[1])
-                    if config_dict is not None:
-                        log_timing("T_image_captured", _timing_state, config_dict)
+                    if form_verifyCode_base64:
+                        if config_dict is not None:
+                            log_timing("T_captcha_image_ready", _timing_state, config_dict)
+                        img_base64 = base64.b64decode(form_verifyCode_base64.split(',')[1])
+                        if config_dict is not None:
+                            log_timing("T_image_captured", _timing_state, config_dict)
 
-                if img_base64 is None:
-                    if not Captcha_Browser is None:
-                        debug.log("[TIXCRAFT OCR] Failed to get image from canvas, using fallback: NonBrowser")
-                        img_base64 = base64.b64decode(Captcha_Browser.request_captcha())
+                    if img_base64 is None:
+                        if not Captcha_Browser is None:
+                            debug.log("[TIXCRAFT OCR] Failed to get image from canvas, using fallback: NonBrowser")
+                            img_base64 = base64.b64decode(Captcha_Browser.request_captcha())
 
-            except Exception as exc:
-                debug.log("[TIXCRAFT OCR] Canvas error:", str(exc))
+                except Exception as exc:
+                    timing.outcome = "error"
+                    debug.log("[TIXCRAFT OCR] Canvas error:", str(exc))
 
+            if timing.outcome != "error":
+                timing.outcome = "captured" if img_base64 is not None else "missing"
         # OCR 識別
         if not img_base64 is None:
             try:
-                ocr_answer = ocr.classification(img_base64)
+                with flow_stage(config_dict, "ocr_classify") as timing:
+                    ocr_answer = ocr.classification(img_base64)
+                    timing.outcome = "returned" if ocr_answer else "empty"
                 if config_dict is not None:
                     log_timing("T_ocr_done", _timing_state, config_dict)
             except Exception as exc:
@@ -3042,8 +3117,9 @@ async def nodriver_tixcraft_auto_ocr(tab, config_dict, ocr, away_from_keyboard_e
     if not ocr is None:
         form_verifyCode = None
         try:
-            form_verifyCode = await tab.query_selector('#TicketForm_verifyCode')
-            is_input_box_exist = True
+            with flow_stage(config_dict, "ocr_input_lookup"):
+                form_verifyCode = await tab.query_selector('#TicketForm_verifyCode')
+                is_input_box_exist = True
         except Exception as exc:
             pass
     else:
@@ -3064,8 +3140,12 @@ async def nodriver_tixcraft_auto_ocr(tab, config_dict, ocr, away_from_keyboard_e
             if away_from_keyboard_enable:
                 # 頁面尚未準備好，重試
                 # PS: 通常發生在非同步腳本取得驗證碼圖片時
-                is_need_redo_ocr = True
-                await asyncio.sleep(0.1)
+                with flow_stage(config_dict, "ocr_retry_reason") as timing:
+                    is_need_redo_ocr = True
+                    timing.outcome = "missing_answer"
+                with flow_stage(config_dict, "ocr_retry_wait") as timing:
+                    timing.outcome = "missing_answer"
+                    await asyncio.sleep(0.1)
             else:
                 await nodriver_tixcraft_keyin_captcha_code(tab, config_dict=config_dict)
         else:
@@ -3074,17 +3154,28 @@ async def nodriver_tixcraft_auto_ocr(tab, config_dict, ocr, away_from_keyboard_e
             if len(ocr_answer) == 4:
                 # Yii2 hash pre-validation (hash available after first reload, 0 on first load)
                 if away_from_keyboard_enable:
-                    hash1 = await nodriver_get_yii_captcha_hash(tab)
+                    with flow_stage(config_dict, "ocr_hash_read") as timing:
+                        hash1 = await nodriver_get_yii_captcha_hash(tab)
+                        timing.outcome = "available" if hash1 > 0 else "unavailable"
                     if hash1 > 0:
-                        if not util.yii_captcha_verify(ocr_answer, hash1):
-                            candidates = util.yii_captcha_edit1(ocr_answer, hash1)
+                        with flow_stage(config_dict, "ocr_hash_validate") as timing:
+                            hash_matches = util.yii_captcha_verify(ocr_answer, hash1)
+                            timing.outcome = "matched" if hash_matches else "mismatch"
+                        if not hash_matches:
+                            with flow_stage(config_dict, "ocr_hash_edit") as timing:
+                                candidates = util.yii_captcha_edit1(ocr_answer, hash1)
+                                timing.outcome = "candidate" if candidates else "no_candidate"
                             if candidates:
                                 ocr_answer = candidates[0]
                                 debug.log(f"[TIXCRAFT OCR] Hash edit1 corrected to: {ocr_answer}")
                             else:
                                 debug.log(f"[TIXCRAFT OCR] Hash mismatch, no edit1 solution, reloading")
-                                is_need_redo_ocr = True
-                                await nodriver_tixcraft_reload_captcha(tab, domain_name)
+                                with flow_stage(config_dict, "ocr_retry_reason") as timing:
+                                    is_need_redo_ocr = True
+                                    timing.outcome = "hash_mismatch"
+                                with flow_stage(config_dict, "ocr_retry_refresh") as timing:
+                                    timing.outcome = "hash_mismatch"
+                                    await nodriver_tixcraft_reload_captcha(tab, domain_name)
                                 ocr_answer = None
                         else:
                             debug.log(f"[TIXCRAFT OCR] Hash verified ok: {ocr_answer}")
@@ -3094,15 +3185,21 @@ async def nodriver_tixcraft_auto_ocr(tab, config_dict, ocr, away_from_keyboard_e
                 if not away_from_keyboard_enable:
                     await nodriver_tixcraft_keyin_captcha_code(tab, config_dict=config_dict)
                 else:
-                    is_need_redo_ocr = True
+                    with flow_stage(config_dict, "ocr_retry_reason") as timing:
+                        is_need_redo_ocr = True
+                        timing.outcome = "invalid_length_changed" if previous_answer != ocr_answer else "invalid_length_same"
                     if previous_answer != ocr_answer:
                         previous_answer = ocr_answer
                         debug.log("[TIXCRAFT OCR] Reloading captcha")
 
-                        await nodriver_tixcraft_reload_captcha(tab, domain_name)
+                        with flow_stage(config_dict, "ocr_retry_refresh") as timing:
+                            timing.outcome = "invalid_length"
+                            await nodriver_tixcraft_reload_captcha(tab, domain_name)
 
                         if ocr_captcha_image_source == CONST_OCR_CAPTCH_IMAGE_SOURCE_CANVAS:
-                            await asyncio.sleep(0.3)
+                            with flow_stage(config_dict, "ocr_retry_wait") as timing:
+                                timing.outcome = "canvas_refresh"
+                                await asyncio.sleep(0.3)
     else:
         debug.log("[TIXCRAFT OCR] Input box not found, exiting OCR...")
 
@@ -3166,7 +3263,8 @@ async def nodriver_tixcraft_ticket_main_ocr(tab, config_dict, ocr, Captcha_Brows
 
                     # Try to dismiss any existing alert before continuing
                     try:
-                        await tab.send(cdp.page.handle_java_script_dialog(accept=True))
+                        with flow_stage(config_dict, "ocr_retry_alert_dismiss"):
+                            await tab.send(cdp.page.handle_java_script_dialog(accept=True))
                         debug.log("[TIXCRAFT OCR] Dismissed existing alert")
                     except:
                         pass
@@ -3181,11 +3279,15 @@ async def nodriver_tixcraft_ticket_main_ocr(tab, config_dict, ocr, Captcha_Brows
                     except (TypeError, ValueError):
                         cooldown = 2.5
                     if cooldown > 0:
-                        await asyncio.sleep(cooldown)
+                        with flow_stage(config_dict, "ocr_retry_wait") as timing:
+                            timing.outcome = "cooldown"
+                            await asyncio.sleep(cooldown)
                     fail_count = 0  # Reset consecutive counter after handling
 
             # 檢查是否還在同一頁面
-            new_url, _ = await nodriver_current_url(tab)
+            with flow_stage(config_dict, "ocr_retry_url_check") as timing:
+                new_url, _ = await nodriver_current_url(tab)
+                timing.outcome = "same_page" if new_url == current_url else "changed_page"
             if new_url != current_url:
                 break
 
