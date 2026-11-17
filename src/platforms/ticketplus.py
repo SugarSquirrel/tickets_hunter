@@ -7,6 +7,7 @@ import json
 import random
 import time
 import traceback
+from urllib.parse import urlsplit
 
 from zendriver import cdp
 
@@ -82,6 +83,11 @@ CONST_TICKETPLUS_STEPPER_WAIT_MS = 800
 # Once a zone's body has rendered without a stepper (not on sale yet, or not for sale to this
 # session), how long to wait in case it is mid-patch before moving to the next keyword.
 CONST_TICKETPLUS_NOT_ON_SALE_GRACE_MS = 150
+
+# A stalled refresh must not keep selection disabled forever. While waiting, return
+# to the main loop so pause/stop and configuration reload continue to work.
+CONST_TICKETPLUS_REFRESH_TIMEOUT_SEC = 10.0
+CONST_TICKETPLUS_REFRESH_QUIET_SEC = 0.05
 
 _state = {}
 
@@ -455,6 +461,116 @@ async def nodriver_ticketplus_account_auto_fill(tab, config_dict):
     return is_user_signin
 
 
+async def _ticketplus_refresh_tracker(tab):
+    """Passively track TicketPlus XHR/fetch requests, once per browser tab."""
+    tracker = getattr(tab, '_ticketplus_refresh_tracker', None)
+    if tracker is not None:
+        return tracker
+    tracker = {"sequence": 0, "pending": {}, "last_activity": 0.0}
+
+    async def request_started(event):
+        if event.type_ not in (cdp.network.ResourceType.XHR, cdp.network.ResourceType.FETCH):
+            return
+        host = urlsplit(event.request.url).hostname or ""
+        if host != 'ticketplus.com.tw' and not host.endswith('.ticketplus.com.tw'):
+            return
+        tracker["sequence"] += 1
+        now = time.monotonic()
+        # Bound bookkeeping when a request never produces a completion event.
+        tracker["pending"] = {key: value for key, value in tracker["pending"].items()
+                              if now - value[1] < CONST_TICKETPLUS_REFRESH_TIMEOUT_SEC}
+        tracker["pending"][str(event.request_id)] = (tracker["sequence"], now)
+        tracker["last_activity"] = now
+
+    async def request_finished(event):
+        if tracker["pending"].pop(str(event.request_id), None) is not None:
+            tracker["last_activity"] = time.monotonic()
+
+    try:
+        await asyncio.wait_for(tab.send(cdp.network.enable()), timeout=2.0)
+        tab.add_handler(cdp.network.RequestWillBeSent, request_started)
+        tab.add_handler(cdp.network.LoadingFinished, request_finished)
+        tab.add_handler(cdp.network.LoadingFailed, request_finished)
+        tab._ticketplus_refresh_tracker = tracker
+        return tracker
+    except Exception:
+        return None
+
+
+async def _ticketplus_refresh_is_ready(tab, debug):
+    """Wait across main-loop cycles for network completion and Vue's refresh state."""
+    refresh = _state.get("refresh_pending")
+    if not refresh:
+        return True
+    if refresh["url"] != _ticketplus_current_url(tab):
+        _state.pop("refresh_pending", None)
+        return True
+    elapsed = time.monotonic() - refresh["started"]
+    if elapsed >= CONST_TICKETPLUS_REFRESH_TIMEOUT_SEC:
+        _state.pop("refresh_pending", None)
+        debug.log("[REFRESH] Completion wait timed out; rechecking the page")
+        return True
+
+    tracker = refresh["tracker"]
+    if tracker and any(seq > refresh["sequence"] for seq, _ in tracker["pending"].values()):
+        return False
+    try:
+        raw = await asyncio.wait_for(tab.evaluate('''
+            (function() {
+                var root = document.querySelector('#app');
+                var stack = root && root.__vue__ ? [root.__vue__] : [], guard = 0;
+                var observed = false, busy = false;
+                while (stack.length && guard++ < 400) {
+                    var cur = stack.shift();
+                    if (!cur) continue;
+                    for (var key of ['isRefresh', 'loadingData']) {
+                        if (typeof cur[key] === 'boolean') {
+                            observed = true;
+                            busy = busy || cur[key];
+                        }
+                    }
+                    if (cur.$children) stack = stack.concat(cur.$children);
+                }
+                return JSON.stringify({ observed: observed, busy: busy });
+            })();
+        '''), timeout=1.0)
+        state = util.parse_nodriver_result(raw)
+        if isinstance(state, str):
+            state = json.loads(state)
+        if not isinstance(state, dict) or state.get("busy"):
+            return False
+    except Exception:
+        return False
+
+    has_network_signal = tracker and tracker["sequence"] > refresh["sequence"]
+    if has_network_signal:
+        if time.monotonic() - tracker["last_activity"] < CONST_TICKETPLUS_REFRESH_QUIET_SEC:
+            return False
+    elif not state.get("observed") and elapsed < 0.15:
+        # Older layouts without observable state keep the previous short settle grace.
+        return False
+    _state.pop("refresh_pending", None)
+    debug.log(f"[REFRESH] Data ready after {elapsed:.3f}s")
+    return True
+
+
+def _ticketplus_refresh_due(tab, interval, cycle_started):
+    """Count scan time toward the refresh interval without blocking the main loop."""
+    url = _ticketplus_current_url(tab)
+    schedule = _state.get("refresh_schedule")
+    if not schedule or schedule["url"] != url:
+        schedule = {"url": url, "last_attempt": cycle_started}
+        _state["refresh_schedule"] = schedule
+    return time.monotonic() - schedule["last_attempt"] >= interval
+
+
+def _ticketplus_note_refresh(tab, started=None):
+    _state["refresh_schedule"] = {
+        "url": _ticketplus_current_url(tab),
+        "last_attempt": time.monotonic() if started is None else started,
+    }
+
+
 async def _ticketplus_click_refresh_button(tab, debug):
     """Click the in-page "update ticket count" button. Returns True if clicked.
 
@@ -462,12 +578,18 @@ async def _ticketplus_click_refresh_button(tab, debug):
     "wait for Vue to mount" step afterwards - that check costs ~1s per cycle and here it
     can only ever answer "ready", because Vue never went away.
     """
+    if _state.get("refresh_pending"):
+        return True  # A click is already in flight; do not start another refresh or F5.
+    tracker = await _ticketplus_refresh_tracker(tab)
     try:
         btn = await tab.query_selector('button.float-btn')
         if btn:
+            started = time.monotonic()
+            _ticketplus_note_refresh(tab, started)
+            refresh = {"url": _ticketplus_current_url(tab), "started": started,
+                       "tracker": tracker, "sequence": tracker["sequence"] if tracker else 0}
             await btn.click()
-            # Just long enough for the XHR to return and Vue to patch the list.
-            await asyncio.sleep(0.15)
+            _state["refresh_pending"] = refresh
             _state["spa_mounted"] = True
             debug.log("[REFRESH] Clicked update button (partial refresh)")
             return True
@@ -800,6 +922,9 @@ async def nodriver_ticketplus_read_next_step_state(tab):
 
 async def nodriver_ticketplus_date_auto_select(tab, config_dict):
     """TicketPlus date auto selection."""
+    cycle_started = time.monotonic()
+    if not await _ticketplus_refresh_is_ready(tab, util.create_debug_logger(config_dict)):
+        return False
     debug = util.create_debug_logger(config_dict)
 
     auto_select_mode = config_dict["date_auto_select"]["mode"]
@@ -1156,12 +1281,12 @@ async def nodriver_ticketplus_date_auto_select(tab, config_dict):
         if auto_reload_coming_soon_page_enable and is_vue_ready and (not formated_area_list or len(formated_area_list) == 0):
             try:
                 reload_interval = config_dict["advanced"].get("auto_reload_page_interval", 0)
-                if reload_interval > 0:
-                    debug.log(f"[TicketPlus DATE] Waiting {reload_interval}s before auto-reload...")
-                    await asyncio.sleep(reload_interval)
-                else:
-                    await asyncio.sleep(1.0)
+                # Keep the activity page's existing one-second default for <= 0.
+                reload_interval = reload_interval if reload_interval > 0 else 1.0
+                if not _ticketplus_refresh_due(tab, reload_interval, cycle_started):
+                    return False
 
+                _ticketplus_note_refresh(tab)
                 clicked = await _ticketplus_click_refresh_button(tab, debug)
                 if not clicked:
                     await tab.reload()
@@ -1176,8 +1301,9 @@ async def nodriver_ticketplus_date_auto_select(tab, config_dict):
 async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword, allow_fallback=None):
     """TicketPlus unified selector - language-independent ticket type/area selection.
 
-    allow_fallback overrides the area_auto_fallback setting for this one call; the keyword
-    loop passes it so only the last keyword may fall back. None means use the setting.
+    area_keyword accepts one keyword or an ordered list of keywords. The browser scans
+    the zone list once, then tries the matching targets in priority order. Fallback is
+    considered only for the final keyword, as in the original per-keyword loop.
     """
     debug = util.create_debug_logger(config_dict)
     auto_select_mode = config_dict["area_auto_select"]["mode"]
@@ -1187,6 +1313,8 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword, all
         area_auto_fallback = bool(allow_fallback)
     ticket_number = config_dict["ticket_number"]
     keyword_exclude = config_dict.get("keyword_exclude", "")
+    keywords = (list(area_keyword) or [""]) if isinstance(area_keyword, (list, tuple)) else [area_keyword or ""]
+    remaining_keywords = []
 
     debug.log(f"Unified selector started - keyword: {area_keyword}, tickets: {ticket_number}")
 
@@ -1244,7 +1372,6 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword, all
                 if vue_check.get('hasElements', False):
                     vue_elements_found = True
                     debug.log(f"[VUE WAIT] Vue elements found after {elapsed:.1f}s")
-                    await asyncio.sleep(0.1)
                     break
 
             except Exception as e:
@@ -1276,22 +1403,25 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword, all
         stepper_wait_ms = CONST_TICKETPLUS_STEPPER_WAIT_MS
         not_on_sale_grace_ms = CONST_TICKETPLUS_NOT_ON_SALE_GRACE_MS
 
-        area_keyword_js = json.dumps(area_keyword or "")
+        area_keywords_js = json.dumps(keywords)
         auto_select_mode_js = json.dumps(auto_select_mode or "")
         exclude_keywords = json.dumps(exclude_keywords)
 
         js_result = await tab.evaluate(f'''
             (function() {{
-                const keyword = {area_keyword_js};
+                const keywords = {area_keywords_js};
+                const keyword = keywords.join(';');
                 const ticketNumber = {ticket_number};
                 const allowLessTickets = {allow_less_js};
                 const autoSelectMode = {auto_select_mode_js};
                 const areaAutoFallback = {'true' if area_auto_fallback else 'false'};
                 // Every whitespace-separated term must match (AND). Normalised here once so
                 // the comparison side stays cheap.
-                const keywordTerms = keyword.split(/\\s+/)
-                    .map(function (s) {{ return s.replace(/,/g, '').trim(); }})
-                    .filter(function (s) {{ return s.length > 0; }});
+                const keywordGroups = keywords.map(function (value) {{
+                    return value.split(/\\s+/)
+                        .map(function (s) {{ return s.replace(/,/g, '').trim(); }})
+                        .filter(function (s) {{ return s.length > 0; }});
+                }});
                 // Preference list for choosing BETWEEN ticket rows inside the matched zone
                 // (e.g. plain ticket vs the "+ perk" variant). OR semantics, first hit wins.
                 const ticketTypeTerms = {ticket_type_terms_js};
@@ -1306,12 +1436,33 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword, all
                     return (s || '').replace(/,/g, '').replace(/\\s+/g, ' ').trim();
                 }}
 
-                function matchesKeywords(name) {{
-                    if (!keywordTerms.length) return false;
+                function matchesKeywords(name, terms) {{
+                    if (!terms.length) return false;
                     const n = norm(name);
                     // All terms in one priority must be present (AND). Previously only the
                     // first two terms were honoured and the rest were silently dropped.
-                    return keywordTerms.every(function (kw) {{ return n.indexOf(kw) >= 0; }});
+                    return terms.every(function (kw) {{ return n.indexOf(kw) >= 0; }});
+                }}
+
+                function targetsFor(items) {{
+                    const targets = [], seen = new Set();
+                    keywordGroups.forEach(function (terms, index) {{
+                        let item = terms.length ? items.find(p => matchesKeywords(p.name, terms)) : null;
+                        if (!item && (!terms.length || (areaAutoFallback && index === keywordGroups.length - 1))) {{
+                            item = items[getTargetIndex(items, autoSelectMode)];
+                        }}
+                        if (item && !seen.has(item)) {{
+                            seen.add(item);
+                            targets.push(Object.assign({{ keywordIndex: index }}, item));
+                        }}
+                    }});
+                    return targets;
+                }}
+
+                function strictMiss(soldOutNames) {{
+                    return {{ success: false, strict_mode: true, attempted_keyword: keyword,
+                              keyword_in_sold_out: soldOutNames.some(name =>
+                                  keywordGroups.some(terms => matchesKeywords(name, terms))) }};
                 }}
 
                 function isSoldOut(element) {{
@@ -1562,115 +1713,119 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword, all
                                  lowStockSkipped: lowStockNames.slice(0, 6) }};
                     }}
 
-                    let target = null;
-                    if (keywordTerms.length) {{
-                        target = validPanels.find(p => matchesKeywords(p.name));
-                    }}
-                    if (!target && keywordTerms.length && !areaAutoFallback) {{
-                        const keywordInSoldOut = soldOutNames.some(n => matchesKeywords(n));
-                        return {{ success: false, strict_mode: true, attempted_keyword: keyword, keyword_in_sold_out: keywordInSoldOut }};
-                    }}
-                    if (!target) {{
-                        const idx = getTargetIndex(validPanels, autoSelectMode);
-                        target = validPanels[idx];
-                    }}
+                    const targets = targetsFor(validPanels);
+                    if (!targets.length) return strictMiss(soldOutNames);
 
-                    if (!target) {{
-                        return {{ success: false, message: 'No target panel' }};
-                    }}
-
-                    const header = target.panel.querySelector('.v-expansion-panel-header');
-                    const isExpanded = target.panel.classList.contains('v-expansion-panel--active');
-                    if (!isExpanded && header) {{
-                        console.log('Clicking to expand:', target.name);
-                        header.click();
-                    }}
-
-                    function resultFor(applied) {{
-                        if (applied.ok) {{
-                            return {{ success: true, type: 'expansion_panel', selected: target.name,
-                                     clicked: true, countBefore: applied.before,
-                                     countClicks: applied.clicks, countDirection: applied.direction,
-                                     rowText: applied.rowText, rowPreferred: applied.preferred,
-                                     rowCount: applied.rows, waitedMs: applied.waitedMs }};
-                        }}
-                        return {{ success: true, type: 'expansion_panel', selected: target.name,
-                                 clicked: false, needRetry: true, applyReason: applied.reason,
-                                 got: applied.got, want: applied.want }};
-                    }}
-
-                    // Vue renders the panel body lazily: on a freshly expanded panel the stepper
-                    // does not exist yet in this synchronous pass. Previously that always fell
-                    // through to a Python-side retry loop (0.3s sleep + up to 5 polls), which cost
-                    // roughly a second at the exact moment a returned ticket appears.
-                    // Wait for it here instead, driven by the DOM itself, and act the instant it
-                    // mounts. Requires await_promise=True on the caller.
-                    if (pickTicketBox(target.panel)) {{
-                        return resultFor(applyCount(target.panel, ticketNumber));
-                    }}
-
-                    return new Promise(function (resolve) {{
-                        const startedAt = Date.now();
-                        let settled = false;
-                        let observer = null;
-                        let timer = null;
-                        let graceTimer = null;
-
-                        function finish(res) {{
-                            if (settled) return;
-                            settled = true;
-                            try {{ if (observer) observer.disconnect(); }} catch (e) {{}}
-                            if (timer) clearTimeout(timer);
-                            if (graceTimer) clearTimeout(graceTimer);
-                            resolve(res);
+                    function selectPanel(target) {{
+                        const header = target.panel.querySelector('.v-expansion-panel-header');
+                        const isExpanded = target.panel.classList.contains('v-expansion-panel--active');
+                        if (!isExpanded && header) {{
+                            console.log('Clicking to expand:', target.name);
+                            header.click();
                         }}
 
-                        // A body that has rendered but holds no stepper is a zone that cannot be
-                        // bought right now: before the opening the site shows the sale-start time
-                        // there instead, and the stepper only appears once a refresh brings the
-                        // server's "onsale". Treating that as "not mounted yet" spent the whole
-                        // wait plus the Python retries - about 2s per keyword - so with nine
-                        // keywords the refresh that reveals the opening came ~20s apart. The body
-                        // and its stepper render in the same patch, so a short grace is enough.
-                        function bodyRendered() {{
-                            const body = target.panel.querySelector('.v-expansion-panel-content');
-                            return !!(body && body.querySelector('*'));
-                        }}
-
-                        function armGrace() {{
-                            if (graceTimer || settled) return;
-                            graceTimer = setTimeout(function () {{
-                                if (attempt()) return;
-                                finish({{ success: false, type: 'expansion_panel', selected: target.name,
-                                         clicked: false, notOnSale: true }});
-                            }}, {not_on_sale_grace_ms});
-                        }}
-
-                        function attempt() {{
-                            if (settled) return true;
-                            if (!pickTicketBox(target.panel)) {{
-                                if (bodyRendered()) armGrace();
-                                return false;
+                        function resultFor(applied) {{
+                            if (applied.ok) {{
+                                return {{ success: true, type: 'expansion_panel', selected: target.name,
+                                         clicked: true, countBefore: applied.before,
+                                         countClicks: applied.clicks, countDirection: applied.direction,
+                                         rowText: applied.rowText, rowPreferred: applied.preferred,
+                                         rowCount: applied.rows, waitedMs: applied.waitedMs }};
                             }}
-                            const applied = applyCount(target.panel, ticketNumber);
-                            applied.waitedMs = Date.now() - startedAt;
-                            console.log('applyCount (after wait):', JSON.stringify(applied));
-                            finish(resultFor(applied));
-                            return true;
+                            return {{ success: true, type: 'expansion_panel', selected: target.name,
+                                     clicked: false, needRetry: true, applyReason: applied.reason,
+                                     got: applied.got, want: applied.want }};
                         }}
 
-                        timer = setTimeout(function () {{
-                            // Give up and let the existing Python retry path take over.
-                            finish({{ success: true, type: 'expansion_panel', selected: target.name,
-                                     clicked: false, needRetry: true, stepperTimedOut: true }});
-                        }}, {stepper_wait_ms});
+                        // Vue renders the panel body lazily: on a freshly expanded panel the stepper
+                        // does not exist yet in this synchronous pass. Previously that always fell
+                        // through to a Python-side retry loop (0.3s sleep + up to 5 polls), which cost
+                        // roughly a second at the exact moment a returned ticket appears.
+                        // Wait for it here instead, driven by the DOM itself, and act the instant it
+                        // mounts. Requires await_promise=True on the caller.
+                        if (pickTicketBox(target.panel)) {{
+                            return resultFor(applyCount(target.panel, ticketNumber));
+                        }}
 
-                        observer = new MutationObserver(function () {{ attempt(); }});
-                        observer.observe(target.panel, {{ childList: true, subtree: true }});
+                        return new Promise(function (resolve) {{
+                            const startedAt = Date.now();
+                            let settled = false;
+                            let observer = null;
+                            let timer = null;
+                            let graceTimer = null;
 
-                        // The stepper may have mounted between the expand click and this line.
-                        attempt();
-                    }});
+                            function finish(res) {{
+                                if (settled) return;
+                                settled = true;
+                                try {{ if (observer) observer.disconnect(); }} catch (e) {{}}
+                                if (timer) clearTimeout(timer);
+                                if (graceTimer) clearTimeout(graceTimer);
+                                resolve(res);
+                            }}
+
+                            // A body that has rendered but holds no stepper is a zone that cannot be
+                            // bought right now: before the opening the site shows the sale-start time
+                            // there instead, and the stepper only appears once a refresh brings the
+                            // server's "onsale". Treating that as "not mounted yet" spent the whole
+                            // wait plus the Python retries - about 2s per keyword - so with nine
+                            // keywords the refresh that reveals the opening came ~20s apart. The body
+                            // and its stepper render in the same patch, so a short grace is enough.
+                            function bodyRendered() {{
+                                const body = target.panel.querySelector('.v-expansion-panel-content');
+                                return !!(body && body.querySelector('*'));
+                            }}
+
+                            function armGrace() {{
+                                if (graceTimer || settled) return;
+                                graceTimer = setTimeout(function () {{
+                                    if (attempt()) return;
+                                    finish({{ success: false, type: 'expansion_panel', selected: target.name,
+                                             clicked: false, notOnSale: true }});
+                                }}, {not_on_sale_grace_ms});
+                            }}
+
+                            function attempt() {{
+                                if (settled) return true;
+                                if (!pickTicketBox(target.panel)) {{
+                                    if (bodyRendered()) armGrace();
+                                    return false;
+                                }}
+                                const applied = applyCount(target.panel, ticketNumber);
+                                applied.waitedMs = Date.now() - startedAt;
+                                console.log('applyCount (after wait):', JSON.stringify(applied));
+                                finish(resultFor(applied));
+                                return true;
+                            }}
+
+                            timer = setTimeout(function () {{
+                                // Give up and let the existing Python retry path take over.
+                                finish({{ success: true, type: 'expansion_panel', selected: target.name,
+                                         clicked: false, needRetry: true, stepperTimedOut: true }});
+                            }}, {stepper_wait_ms});
+
+                            observer = new MutationObserver(function () {{ attempt(); }});
+                            observer.observe(target.panel, {{ childList: true, subtree: true }});
+
+                            // The stepper may have mounted between the expand click and this line.
+                            attempt();
+                        }});
+                    }}
+
+                    return (async function () {{
+                        let last = {{ success: false, message: 'No target panel' }};
+                        for (const target of targets) {{
+                            last = await selectPanel(target);
+                            if (last.clicked || last.needRetry) {{
+                                // A transient stepper failure still uses the bounded Python
+                                // retry, scoped to THIS zone. Resume lower priorities only
+                                // after those retries fail.
+                                last.retryPanelIndex = target.index;
+                                last.remainingKeywords = keywords.slice(target.keywordIndex + 1);
+                                return last;
+                            }}
+                        }}
+                        return last;
+                    }})();
 
                 }} else if (hasCountButton) {{
                     const rows = document.querySelectorAll('.row.py-1.py-md-4');
@@ -1701,20 +1856,10 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword, all
                         return {{ success: false, message: 'No valid rows' }};
                     }}
 
-                    let target = null;
-                    if (keywordTerms.length) {{
-                        target = validRows.find(r => matchesKeywords(r.name));
-                    }}
-                    if (!target && keywordTerms.length && !areaAutoFallback) {{
-                        const keywordInSoldOut = soldOutRowNames.some(n => matchesKeywords(n));
-                        return {{ success: false, strict_mode: true, attempted_keyword: keyword, keyword_in_sold_out: keywordInSoldOut }};
-                    }}
-                    if (!target) {{
-                        const idx = getTargetIndex(validRows, autoSelectMode);
-                        target = validRows[idx];
-                    }}
-
-                    if (target && target.plusBtn) {{
+                    const targets = targetsFor(validRows);
+                    if (!targets.length) return strictMiss(soldOutRowNames);
+                    for (const target of targets) {{
+                        if (!target.plusBtn) continue;
                         const applied = applyCount(target.row, ticketNumber);
                         console.log('applyCount(row):', JSON.stringify(applied));
                         if (applied.ok) {{
@@ -1722,8 +1867,7 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword, all
                                      clicked: true, countBefore: applied.before,
                                      countClicks: applied.clicks, countDirection: applied.direction }};
                         }}
-                        return {{ success: false, type: 'count_button', selected: target.name,
-                                 clicked: false, message: 'applyCount failed: ' + applied.reason }};
+                        console.log('applyCount failed:', applied.reason);
                     }}
                 }}
 
@@ -1737,6 +1881,8 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword, all
             is_selected = result.get('success', False) and result.get('clicked', False)
 
             if result.get('needRetry', False):
+                remaining_keywords = result.get('remainingKeywords') or []
+                retry_panel_index_js = json.dumps(result.get('retryPanelIndex', -1))
                 apply_reason = result.get('applyReason')
                 if apply_reason == 'insufficient-stock':
                     debug.log(
@@ -1882,27 +2028,13 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword, all
                                 return {{ clicked: true, before: before, clicks: budget }};
                             }}
 
-                            const seatsAreas = document.querySelectorAll('.seats-area');
-                            for (let area of seatsAreas) {{
-                                const activeSubPanel = area.querySelector('.v-expansion-panel--active');
-                                if (activeSubPanel && activeSubPanel.querySelector('.mdi-plus')) {{
-                                    const r = applyCount(activeSubPanel);
-                                    if (r) {{
-                                        console.log('Retry: stepper set in nested sub-panel', JSON.stringify(r));
-                                        return {{ success: true, clicked: r.clicked, countBefore: r.before, countClicks: r.clicks }};
-                                    }}
-                                }}
-                            }}
-
-                            const panels = document.querySelectorAll('.v-expansion-panel');
-                            for (let panel of panels) {{
-                                if (panel.classList.contains('v-expansion-panel--active') &&
-                                    panel.querySelector('.mdi-plus')) {{
-                                    const r = applyCount(panel);
-                                    if (r) {{
-                                        console.log('Retry: stepper set in panel', JSON.stringify(r));
-                                        return {{ success: true, clicked: r.clicked, countBefore: r.before, countClicks: r.clicks }};
-                                    }}
+                            // Keep retries on the chosen zone, even when other zones are open.
+                            const panels = document.querySelectorAll('.seats-area .v-expansion-panel:not(:has(.seats-area))');
+                            const panel = panels[{retry_panel_index_js}];
+                            if (panel && panel.classList.contains('v-expansion-panel--active')) {{
+                                const r = applyCount(panel);
+                                if (r) {{
+                                    return {{ success: true, clicked: r.clicked, countBefore: r.before, countClicks: r.clicks }};
                                 }}
                             }}
                             return {{ success: false, clicked: false }};
@@ -1986,6 +2118,9 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword, all
         except Exception as backup_exc:
             debug.log(f"Backup check failed: {backup_exc}")
 
+    if not is_selected and remaining_keywords:
+        return await nodriver_ticketplus_unified_select(
+            tab, config_dict, remaining_keywords, allow_fallback=area_auto_fallback)
     return is_selected
 
 
@@ -2537,6 +2672,7 @@ async def nodriver_ticketplus_order(tab, config_dict, ocr, Captcha_Browser):
 
     Modifies _state in place (no return value).
     """
+    cycle_started = time.monotonic()
     debug = util.create_debug_logger(config_dict)
 
     if _state.get("is_ticket_assigned", False):
@@ -2568,31 +2704,27 @@ async def nodriver_ticketplus_order(tab, config_dict, ocr, Captcha_Browser):
         debug.log(f"[QUEUE] Left the queue after {time.time() - _state['queue_since']:.0f}s")
         _state["queue_since"] = None
 
+    if not await _ticketplus_refresh_is_ready(tab, debug):
+        return
+
     if await sleep_with_pause_check(tab, 0.05, config_dict):
         debug.log("Paused during page wait")
         return
 
-    layout_info = await nodriver_ticketplus_detect_layout_style(tab, config_dict)
-
-    if layout_info and layout_info.get('paused'):
-        debug.log("Paused during layout detection")
-        return
-
-    current_layout_style = layout_info.get('style', 0) if isinstance(layout_info, dict) else 0
-
     if debug.enabled:
+        # Layout and button status are diagnostic only. Actual selection and the
+        # pre-submit readiness check read their own authoritative page state.
+        layout_info = await nodriver_ticketplus_detect_layout_style(tab, config_dict)
+        if layout_info and layout_info.get('paused'):
+            return
+        layout_info = layout_info if isinstance(layout_info, dict) else {}
+        current_layout_style = layout_info.get('style', 0)
         layout_names = {1: "Expansion panel (Page4)", 2: "Seat selection (Page2)", 3: "Simplified (Page1/Page3)"}
         button_status = "Enabled" if layout_info.get('button_enabled', False) else "Disabled"
         debug.log(f"Detected layout style: {current_layout_style} - {layout_names.get(current_layout_style, 'Unknown')}")
         debug.log(f"Layout detection details: Button found={layout_info.get('found', False)}, Button status={button_status}")
         if layout_info.get('debug_info'):
             debug.log(f"Layout detection debug: {layout_info.get('debug_info')}")
-
-    is_button_enabled = await nodriver_ticketplus_check_next_button(tab)
-
-    debug.log(f"Next button status: {'Enabled' if is_button_enabled else 'Disabled'}")
-
-    is_price_assign_by_bot = False
 
     area_keyword_raw = config_dict.get("area_auto_select", {}).get("area_keyword", "").strip()
 
@@ -2601,41 +2733,10 @@ async def nodriver_ticketplus_order(tab, config_dict, ocr, Captcha_Browser):
     debug.log(f"[TicketPlus] Parsed keywords: {keyword_array}")
     debug.log(f"[TicketPlus] Total keyword groups: {len(keyword_array)}")
 
-    need_select_ticket = True
-
-    debug.log(f"Ticket selection is always required (TicketPlus quirk)")
-
-    is_price_assign_by_bot = False
-    keyword_matched = False
-
-    if len(keyword_array) > 0:
-        # Fallback means "when every keyword has missed" (that is how the settings page explains
-        # it), so it may only kick in on the last keyword. It used to be applied to each call,
-        # which let the first miss jump straight to the fallback pool: keywords 2..N were never
-        # tried, and a second target zone with tickets left lost to a random one.
-        area_auto_fallback = config_dict.get('area_auto_fallback', False)
-        for keyword_index, area_keyword_item in enumerate(keyword_array):
-            debug.log(f"[TicketPlus AREA KEYWORD] Trying keyword #{keyword_index + 1}/{len(keyword_array)}: '{area_keyword_item}'")
-
-            is_last_keyword = keyword_index == len(keyword_array) - 1
-            is_price_assign_by_bot = await nodriver_ticketplus_unified_select(
-                tab, config_dict, area_keyword_item,
-                allow_fallback=area_auto_fallback and is_last_keyword)
-
-            if is_price_assign_by_bot:
-                keyword_matched = True
-                debug.log(f"[TicketPlus AREA KEYWORD] Keyword #{keyword_index + 1} matched: '{area_keyword_item}' [OK]")
-                break
-
-            debug.log(f"[TicketPlus AREA KEYWORD] Keyword #{keyword_index + 1} failed, trying next...")
-
-        if not keyword_matched:
-            debug.log(f"[TicketPlus AREA KEYWORD] All {len(keyword_array)} keywords failed to match")
-    else:
-        debug.log(f"[TicketPlus AREA KEYWORD] No keyword specified, using auto select mode")
-        is_price_assign_by_bot = await nodriver_ticketplus_unified_select(tab, config_dict, "")
-
-    is_need_refresh = not is_price_assign_by_bot
+    # One page scan for all priorities. The selector still waits on a chosen zone's
+    # lazy body and tries lower priorities only when that zone cannot be selected.
+    is_price_assign_by_bot = await nodriver_ticketplus_unified_select(
+        tab, config_dict, keyword_array or [""])
 
     if is_price_assign_by_bot:
         if await check_and_handle_pause(config_dict):
@@ -2739,9 +2840,8 @@ async def nodriver_ticketplus_order(tab, config_dict, ocr, Captcha_Browser):
 
         auto_reload_interval = config_dict["advanced"].get("auto_reload_page_interval", 0)
         if auto_reload_interval >= 0:
-            if auto_reload_interval > 0:
-                debug.log(f"[AUTO RELOAD] Waiting {auto_reload_interval} seconds before reload...")
-                await asyncio.sleep(auto_reload_interval)
+            if not _ticketplus_refresh_due(tab, auto_reload_interval, cycle_started):
+                return
 
             # A full reload while queued throws the queue position away and the bot then
             # re-queues from the back, forever. TicketPlus hides the partial-refresh
@@ -2756,6 +2856,9 @@ async def nodriver_ticketplus_order(tab, config_dict, ocr, Captcha_Browser):
             else:
                 debug.log("[AUTO RELOAD] Refreshing ticket count...")
                 try:
+                    # Also pace missing-button/error attempts, so the full-reload
+                    # fallback cannot turn into a rapid retry loop.
+                    _ticketplus_note_refresh(tab)
                     clicked = await _ticketplus_click_refresh_button(tab, debug)
                     if clicked:
                         _state["float_btn_misses"] = 0
