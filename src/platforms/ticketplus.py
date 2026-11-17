@@ -88,8 +88,30 @@ CONST_TICKETPLUS_NOT_ON_SALE_GRACE_MS = 150
 # to the main loop so pause/stop and configuration reload continue to work.
 CONST_TICKETPLUS_REFRESH_TIMEOUT_SEC = 10.0
 CONST_TICKETPLUS_REFRESH_QUIET_SEC = 0.05
+CONST_TICKETPLUS_CDP_TIMEOUT_SEC = 3.0
 
 _state = {}
+
+
+async def _ticketplus_evaluate(tab, expression, *, await_promise=False, timeout=None):
+    """A lost CDP reply must return control to the bot rather than wait forever."""
+    if timeout is None:
+        timeout = CONST_TICKETPLUS_CDP_TIMEOUT_SEC
+    # wait_for cancels our waiter, not a CDP command already queued in Chrome.
+    # Reject late execution in the page as well, including synchronous retry and
+    # date-selection scripts that can click before returning their result.
+    deadline_ms = int(time.time() * 1000 + timeout * 1000)
+    expression = (
+        "(function() { if (Date.now() >= " + str(deadline_ms) + ") return null; return ("
+        + expression.rstrip().rstrip(';') + "); })()")
+    call = tab.evaluate(expression, await_promise=True) if await_promise else tab.evaluate(expression)
+    return await asyncio.wait_for(call, timeout=timeout)
+
+
+async def _ticketplus_pause_delay(tab, seconds, config_dict):
+    return await asyncio.wait_for(
+        sleep_with_pause_check(tab, seconds, config_dict),
+        timeout=max(0, seconds) + CONST_TICKETPLUS_CDP_TIMEOUT_SEC)
 
 
 def _get_status():
@@ -125,8 +147,8 @@ async def _ticketplus_wait_for_navigation(tab, url_before, max_wait_sec, config_
     immediately used to burn the whole sleep anyway. Polls the cached URL only, and keeps
     honouring the pause flag while it waits.
     """
-    deadline = time.time() + max_wait_sec
-    while time.time() < deadline:
+    deadline = time.monotonic() + max_wait_sec
+    while time.monotonic() < deadline:
         # Honour BOTH flags. Checking only pause meant the stop button did nothing while
         # this loop was running, which is exactly the responsiveness hole this whole
         # rewrite set out to close.
@@ -163,7 +185,7 @@ async def nodriver_ticketplus_detect_layout_style(tab, config_dict=None):
         }
     """
     try:
-        result = await evaluate_with_pause_check(tab, '''
+        result = await asyncio.wait_for(evaluate_with_pause_check(tab, '''
             (function() {
                 console.log("=== Layout Detection Started ===");
 
@@ -264,7 +286,7 @@ async def nodriver_ticketplus_detect_layout_style(tab, config_dict=None):
                     debug_info: "No layout detected"
                 };
             })();
-        ''')
+        '''), timeout=CONST_TICKETPLUS_CDP_TIMEOUT_SEC)
 
         if result is None:
             return {'style': 0, 'found': False, 'button_enabled': False, 'paused': True}
@@ -292,9 +314,9 @@ async def nodriver_ticketplus_account_sign_in(tab, config_dict):
     country_code = ""
     try:
         my_css_selector = 'input[placeholder="\u5340\u78bc"]'
-        el_country = await tab.query_selector(my_css_selector)
+        el_country = await asyncio.wait_for(tab.query_selector(my_css_selector), timeout=CONST_TICKETPLUS_CDP_TIMEOUT_SEC)
         if el_country:
-            country_code = await el_country.apply('function (element) { return element.value; } ')
+            country_code = await asyncio.wait_for(el_country.apply('function (element) { return element.value; } '), timeout=CONST_TICKETPLUS_CDP_TIMEOUT_SEC)
             debug.log(f"[TICKETPLUS SIGNIN] country_code: {country_code}")
     except Exception as exc:
         debug.log(f"[TICKETPLUS SIGNIN] country code error: {exc}")
@@ -302,9 +324,9 @@ async def nodriver_ticketplus_account_sign_in(tab, config_dict):
     is_account_assigned = False
     try:
         my_css_selector = 'input[placeholder="\u624b\u6a5f\u865f\u78bc *"]'
-        el_account = await tab.query_selector(my_css_selector)
+        el_account = await asyncio.wait_for(tab.query_selector(my_css_selector), timeout=CONST_TICKETPLUS_CDP_TIMEOUT_SEC)
         if el_account:
-            await el_account.click()
+            await asyncio.wait_for(el_account.click(), timeout=CONST_TICKETPLUS_CDP_TIMEOUT_SEC)
             # Read-back is a diagnostic, NOT a gate. The phone field reformats what you type
             # (country code split, spacing), so a mismatch here does not mean the value is
             # wrong - and gating on it skipped the whole password block, leaving the bot
@@ -318,10 +340,10 @@ async def nodriver_ticketplus_account_sign_in(tab, config_dict):
     if is_account_assigned:
         try:
             my_css_selector = 'input[type="password"]'
-            el_password = await tab.query_selector(my_css_selector)
+            el_password = await asyncio.wait_for(tab.query_selector(my_css_selector), timeout=CONST_TICKETPLUS_CDP_TIMEOUT_SEC)
             if el_password:
                 debug.log("[TICKETPLUS SIGNIN] Entering password...")
-                await el_password.click()
+                await asyncio.wait_for(el_password.click(), timeout=CONST_TICKETPLUS_CDP_TIMEOUT_SEC)
                 await _ticketplus_fill_and_verify(
                     el_password, ticketplus_password, "password", debug, required=False)
                 is_filled_form = True
@@ -330,8 +352,8 @@ async def nodriver_ticketplus_account_sign_in(tab, config_dict):
                 if country_code=="+886":
                     # only this case to auto sumbmit.
                     debug.log("[TICKETPLUS SIGNIN] press enter")
-                    await tab.send(cdp.input_.dispatch_key_event("keyDown", code="Enter", key="Enter", text="\r", windows_virtual_key_code=13))
-                    await tab.send(cdp.input_.dispatch_key_event("keyUp", code="Enter", key="Enter", text="\r", windows_virtual_key_code=13))
+                    await asyncio.wait_for(tab.send(cdp.input_.dispatch_key_event("keyDown", code="Enter", key="Enter", text="\r", windows_virtual_key_code=13)), timeout=CONST_TICKETPLUS_CDP_TIMEOUT_SEC)
+                    await asyncio.wait_for(tab.send(cdp.input_.dispatch_key_event("keyUp", code="Enter", key="Enter", text="\r", windows_virtual_key_code=13)), timeout=CONST_TICKETPLUS_CDP_TIMEOUT_SEC)
                     # Wait for the password field to disappear instead of sleeping a flat ~1s:
                     # on success this returns in a fraction of that, and on failure it says so
                     # rather than reporting the submit as done.
@@ -352,7 +374,7 @@ async def nodriver_ticketplus_account_sign_in(tab, config_dict):
 async def nodriver_ticketplus_is_signin(tab):
     is_user_signin = False
     try:
-        cookies  = await tab.browser.cookies.get_all()
+        cookies  = await asyncio.wait_for(tab.browser.cookies.get_all(), timeout=CONST_TICKETPLUS_CDP_TIMEOUT_SEC)
         for cookie in cookies:
             if cookie.name=='user':
                 if '%22account%22:%22' in cookie.value:
@@ -428,9 +450,9 @@ async def nodriver_ticketplus_account_auto_fill(tab, config_dict):
                 try:
                     # full screen mode.
                     my_css_selector = 'button.v-btn > span.v-btn__content > i.mdi-account'
-                    sign_in_btn = await tab.query_selector(my_css_selector)
+                    sign_in_btn = await asyncio.wait_for(tab.query_selector(my_css_selector), timeout=CONST_TICKETPLUS_CDP_TIMEOUT_SEC)
                     if sign_in_btn:
-                        await sign_in_btn.click()
+                        await asyncio.wait_for(sign_in_btn.click(), timeout=CONST_TICKETPLUS_CDP_TIMEOUT_SEC)
                         is_sign_in_btn_pressed = True
                         await asyncio.sleep(0.2)
                 except Exception as exc:
@@ -441,7 +463,7 @@ async def nodriver_ticketplus_account_auto_fill(tab, config_dict):
                     action_btns = None
                     try:
                         my_css_selector = 'div.px-4.py-3.drawerItem.cursor-pointer'
-                        action_btns = await tab.query_selector_all(my_css_selector)
+                        action_btns = await asyncio.wait_for(tab.query_selector_all(my_css_selector), timeout=CONST_TICKETPLUS_CDP_TIMEOUT_SEC)
                     except Exception as exc:
                         debug.log(f"[TICKETPLUS AUTOFILL] drawer items query error: {exc}")
                         pass
@@ -449,7 +471,7 @@ async def nodriver_ticketplus_account_auto_fill(tab, config_dict):
                         debug.log(f"[TICKETPLUS AUTOFILL] action buttons len: {len(action_btns)}")
                         if len(action_btns) >= 4:
                             try:
-                                await action_btns[3].click()
+                                await asyncio.wait_for(action_btns[3].click(), timeout=CONST_TICKETPLUS_CDP_TIMEOUT_SEC)
                             except Exception as exc:
                                 debug.log(f"[TICKETPLUS AUTOFILL] action button click error: {exc}")
                                 pass
@@ -582,15 +604,21 @@ async def _ticketplus_click_refresh_button(tab, debug):
         return True  # A click is already in flight; do not start another refresh or F5.
     tracker = await _ticketplus_refresh_tracker(tab)
     try:
-        btn = await tab.query_selector('button.float-btn')
+        btn = await asyncio.wait_for(tab.query_selector('button.float-btn'), timeout=CONST_TICKETPLUS_CDP_TIMEOUT_SEC)
         if btn:
             started = time.monotonic()
             _ticketplus_note_refresh(tab, started)
             refresh = {"url": _ticketplus_current_url(tab), "started": started,
                        "tracker": tracker, "sequence": tracker["sequence"] if tracker else 0}
-            await btn.click()
             _state["refresh_pending"] = refresh
             _state["spa_mounted"] = True
+            try:
+                await asyncio.wait_for(btn.click(), timeout=CONST_TICKETPLUS_CDP_TIMEOUT_SEC)
+            except Exception as exc:
+                # The page may have received the click even when its CDP reply was
+                # lost. Retain the in-flight guard instead of falling through to F5.
+                debug.log(f"[REFRESH] Click result unknown; checking completion: {exc}")
+                return True
             debug.log("[REFRESH] Clicked update button (partial refresh)")
             return True
     except Exception:
@@ -612,9 +640,9 @@ async def _ticketplus_fill_and_verify(el, value, label, debug, attempts=3, requi
     """
     for attempt in range(1, attempts + 1):
         try:
-            await el.apply('function (element) { element.value = ""; }')
-            await el.send_keys(value)
-            actual = await el.apply('function (element) { return element.value; }')
+            await asyncio.wait_for(el.apply('function (element) { element.value = ""; }'), timeout=CONST_TICKETPLUS_CDP_TIMEOUT_SEC)
+            await asyncio.wait_for(el.send_keys(value), timeout=CONST_TICKETPLUS_CDP_TIMEOUT_SEC)
+            actual = await asyncio.wait_for(el.apply('function (element) { return element.value; }'), timeout=CONST_TICKETPLUS_CDP_TIMEOUT_SEC)
         except Exception as exc:
             debug.log(f"[TICKETPLUS SIGNIN] {label} type error (attempt {attempt}): {exc}")
             continue
@@ -638,9 +666,9 @@ async def _ticketplus_wait_until(tab, js_condition, timeout_sec, poll_sec=0.1):
     Replaces fixed sleeps that guess how long something takes: returns the moment the
     condition holds (usually far sooner) and reports failure instead of assuming success.
     """
-    deadline = time.time() + timeout_sec
+    deadline = time.monotonic() + timeout_sec
     expr = '(function(){ try { return !!(' + js_condition + '); } catch (e) { return false; } })()'
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         try:
             got = await asyncio.wait_for(tab.evaluate(expr), timeout=2.0)
             if got is True or got == 'true':
@@ -689,7 +717,7 @@ async def nodriver_ticketplus_watch_enqueue(tab, config_dict):
         if not _state.get("enqueue_requests", {}).pop(str(request_id), None):
             return
         try:
-            body, _is_b64 = await tab.send(cdp.network.get_response_body(request_id))
+            body, _is_b64 = await asyncio.wait_for(tab.send(cdp.network.get_response_body(request_id)), timeout=CONST_TICKETPLUS_CDP_TIMEOUT_SEC)
         except Exception as exc:
             debug.log(f"[ENQUEUE] Could not read response body: {exc}")
             return
@@ -941,10 +969,10 @@ async def nodriver_ticketplus_date_auto_select(tab, config_dict):
         # TicketPlus 2026-05 revamp: a Vue sub-component wrapper div now sits between
         # #buyTicket and .sesstion-item, so a direct-child combinator matches nothing.
         # Use a descendant combinator (still matches the old direct-child layout too).
-        area_list = await tab.query_selector_all('div#buyTicket div.sesstion-item')
+        area_list = await asyncio.wait_for(tab.query_selector_all('div#buyTicket div.sesstion-item'), timeout=CONST_TICKETPLUS_CDP_TIMEOUT_SEC)
         if area_list and len(area_list) == 0:
             debug.log("empty date item, need retry.")
-            await tab.sleep(0.2)
+            await asyncio.wait_for(tab.sleep(0.2), timeout=CONST_TICKETPLUS_CDP_TIMEOUT_SEC)
     except Exception as exc:
         debug.log("find #buyTicket fail:", exc)
 
@@ -963,7 +991,7 @@ async def nodriver_ticketplus_date_auto_select(tab, config_dict):
             row_text = ""
             row_html = ""
             try:
-                row_html = await row.get_html()
+                row_html = await asyncio.wait_for(row.get_html(), timeout=CONST_TICKETPLUS_CDP_TIMEOUT_SEC)
                 row_text = util.remove_html_tags(row_html)
             except Exception as exc:
                 debug.log("Date item processing failed:", exc)
@@ -1010,7 +1038,7 @@ async def nodriver_ticketplus_date_auto_select(tab, config_dict):
                 for i, row in enumerate(formated_area_list):
                     row_text = ""
                     try:
-                        row_html = await row.get_html()
+                        row_html = await asyncio.wait_for(row.get_html(), timeout=CONST_TICKETPLUS_CDP_TIMEOUT_SEC)
                         row_text = util.remove_html_tags(row_html).lower()
                     except Exception as exc:
                         debug.log(f"[TicketPlus DATE] Failed to get row text: {exc}")
@@ -1050,7 +1078,7 @@ async def nodriver_ticketplus_date_auto_select(tab, config_dict):
 
             # Primary: read sessionId from Vue data layer, navigate directly
             # Avoids clicking loading-state placeholder containers
-            vue_data = await tab.evaluate('''
+            vue_data = await _ticketplus_evaluate(tab, '''
                 (function() {
                     const el = document.querySelector('.eventClass');
                     if (!el || !el.__vue__) return { ready: false };
@@ -1097,12 +1125,12 @@ async def nodriver_ticketplus_date_auto_select(tab, config_dict):
                     else:
                         current_url = tab.url if hasattr(tab, 'url') else ''
                         if not current_url:
-                            current_url = await tab.evaluate('window.location.href')
+                            current_url = await _ticketplus_evaluate(tab, 'window.location.href')
                         event_id = current_url.split('/activity/')[-1].split('/')[0].split('?')[0]
                         order_url = 'https://ticketplus.com.tw/order/' + event_id + '/' + session_id
                         debug.log(f"[TicketPlus DATE] Vue data: date={target_session.get('date', '')} sessionId={session_id}")
                         _state["spa_mounted"] = False
-                        await tab.get(order_url)
+                        await asyncio.wait_for(tab.get(order_url), timeout=10.0)
                         # tab.get() can be answered with a 302 back to the event page, so
                         # confirm where we actually ended up instead of assuming. Reporting a
                         # navigation that did not happen sends the caller down the wrong branch.
@@ -1122,10 +1150,10 @@ async def nodriver_ticketplus_date_auto_select(tab, config_dict):
     if not is_date_clicked and is_vue_ready and formated_area_list and len(formated_area_list) > 0:
         try:
             original_keyword = config_dict["date_auto_select"]["date_keyword"].strip()
-            click_result = await tab.evaluate(f'''
+            click_result = await _ticketplus_evaluate(tab, f'''
                 (function() {{
-                    const originalKeyword = '{original_keyword}';
-                    const autoSelectMode = '{auto_select_mode}';
+                    const originalKeyword = {json.dumps(original_keyword)};
+                    const autoSelectMode = {json.dumps(auto_select_mode)};
                     const dateAutoFallback = {'true' if date_auto_fallback else 'false'};
 
                     console.log('[TicketPlus] Starting date selection - keyword:', originalKeyword, 'mode:', autoSelectMode, 'fallback:', dateAutoFallback);
@@ -1289,7 +1317,7 @@ async def nodriver_ticketplus_date_auto_select(tab, config_dict):
                 _ticketplus_note_refresh(tab)
                 clicked = await _ticketplus_click_refresh_button(tab, debug)
                 if not clicked:
-                    await tab.reload()
+                    await asyncio.wait_for(tab.reload(), timeout=10.0)
                     debug.log("[TicketPlus DATE] Page reloaded, waiting for content...")
                     await asyncio.sleep(0.5)
             except Exception as exc:
@@ -1338,16 +1366,16 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword, all
         auto_reload_interval = config_dict["advanced"].get("auto_reload_page_interval", 5)
         max_vue_wait = max(6.0, min(15.0, auto_reload_interval * 2))
         vue_check_interval = 0.15
-        vue_wait_start = time.time()
+        vue_wait_start = time.monotonic()
         vue_elements_found = False
         last_log_time = 0
 
-        while time.time() - vue_wait_start < max_vue_wait:
-            if await check_and_handle_pause(config_dict):
+        while time.monotonic() - vue_wait_start < max_vue_wait:
+            if await check_and_handle_pause(config_dict) or await check_and_handle_quit(config_dict):
                 return False
 
             try:
-                vue_check = await tab.evaluate('''
+                vue_check = await _ticketplus_evaluate(tab, '''
                     (function() {
                         const panels = document.querySelectorAll('.v-expansion-panel').length;
                         const countBtn = document.querySelectorAll('.count-button .mdi-plus').length;
@@ -1364,7 +1392,7 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword, all
                 if isinstance(vue_check, list):
                     vue_check = {item[0]: item[1].get('value') if isinstance(item[1], dict) else item[1] for item in vue_check}
 
-                elapsed = time.time() - vue_wait_start
+                elapsed = time.monotonic() - vue_wait_start
                 if elapsed - last_log_time >= 1.0:
                     debug.log(f"[VUE WAIT] {elapsed:.1f}s - panels:{vue_check.get('panels', 0)}, countBtn:{vue_check.get('countBtn', 0)}, rowTickets:{vue_check.get('rowTickets', 0)}")
                     last_log_time = elapsed
@@ -1402,13 +1430,17 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword, all
         allow_less_js = 'true' if allow_less else 'false'
         stepper_wait_ms = CONST_TICKETPLUS_STEPPER_WAIT_MS
         not_on_sale_grace_ms = CONST_TICKETPLUS_NOT_ON_SALE_GRACE_MS
+        selection_budget_ms = max(2000, len(keywords) * stepper_wait_ms + 1000)
+        selection_deadline_ms = int(time.time() * 1000) + selection_budget_ms
 
         area_keywords_js = json.dumps(keywords)
         auto_select_mode_js = json.dumps(auto_select_mode or "")
         exclude_keywords = json.dumps(exclude_keywords)
 
-        js_result = await tab.evaluate(f'''
+        js_result = await _ticketplus_evaluate(tab, f'''
             (function() {{
+                const selectionDeadline = {selection_deadline_ms};
+                if (Date.now() >= selectionDeadline) return {{ success: false, message: 'Selection expired' }};
                 const keywords = {area_keywords_js};
                 const keyword = keywords.join(';');
                 const ticketNumber = {ticket_number};
@@ -1602,6 +1634,7 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword, all
                 // failed submit used to leave 2N, 3N... tickets selected. Drive the stepper
                 // to the target instead, and no-op when it is already there.
                 function applyCount(scope, target) {{
+                    if (Date.now() >= selectionDeadline) return {{ ok: false, reason: 'expired' }};
                     const picked = pickTicketBox(scope);
                     if (!picked) return {{ ok: false, reason: 'no-plus' }};
                     const box = picked.box;
@@ -1717,6 +1750,7 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword, all
                     if (!targets.length) return strictMiss(soldOutNames);
 
                     function selectPanel(target) {{
+                        if (Date.now() >= selectionDeadline) return {{ success: false, message: 'Selection expired' }};
                         const header = target.panel.querySelector('.v-expansion-panel-header');
                         const isExpanded = target.panel.classList.contains('v-expansion-panel--active');
                         if (!isExpanded && header) {{
@@ -1725,6 +1759,9 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword, all
                         }}
 
                         function resultFor(applied) {{
+                            if (applied.reason === 'expired') {{
+                                return {{ success: false, message: 'Selection expired' }};
+                            }}
                             if (applied.ok) {{
                                 return {{ success: true, type: 'expansion_panel', selected: target.name,
                                          clicked: true, countBefore: applied.before,
@@ -1873,7 +1910,7 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword, all
 
                 return {{ success: false, message: 'No selectable elements found' }};
             }})();
-        ''', await_promise=True)
+        ''', await_promise=True, timeout=selection_budget_ms / 1000 + 1.0)
 
         result = util.parse_nodriver_result(js_result)
 
@@ -1907,7 +1944,9 @@ async def nodriver_ticketplus_unified_select(tab, config_dict, area_keyword, all
                 await asyncio.sleep(0.3)
 
                 for retry in range(5):
-                    retry_result = await tab.evaluate(f'''
+                    if await check_and_handle_pause(config_dict) or await check_and_handle_quit(config_dict):
+                        return False
+                    retry_result = await _ticketplus_evaluate(tab, f'''
                         (function() {{
                             const target = {ticket_number};
                             const ticketTypeTerms = {ticket_type_terms_js};
@@ -2134,17 +2173,20 @@ async def nodriver_ticketplus_click_next_button_unified(tab, config_dict):
         # Discretionary pause before pressing - a real speed choice, unlike the render-waits
         # elsewhere in this file, so it takes the global multiplier. The narrow range keeps
         # the average at the previous fixed 0.6s.
-        if await sleep_with_pause_check(tab, util.scale_humanized_delay(0.5, 0.7, config_dict), config_dict):
+        if await _ticketplus_pause_delay(tab, util.scale_humanized_delay(0.5, 0.7, config_dict), config_dict):
             return False
 
+        button_deadline_ms = int(time.time() * 1000 + CONST_TICKETPLUS_BUTTON_WAIT_TIMEOUT_SEC * 1000)
         js_result = await asyncio.wait_for(tab.evaluate('''
             (function() {
+                const submitDeadline = ''' + str(button_deadline_ms) + ''';
                 console.log('[NEXT BUTTON] Unified next button clicker started');
 
                 function waitForButtonEnable(selector, maxWait = ''' + str(CONST_TICKETPLUS_BUTTON_WAIT_MS) + ''') {
                     return new Promise((resolve) => {
                         const startTime = Date.now();
                         const checkButton = () => {
+                            if (Date.now() >= submitDeadline) { resolve(null); return; }
                             const button = document.querySelector(selector);
                             if (button && !button.disabled && !button.classList.contains('v-btn--disabled') && !button.classList.contains('disabledBtn')) {
                                 resolve(button);
@@ -2177,7 +2219,7 @@ async def nodriver_ticketplus_click_next_button_unified(tab, config_dict):
                 ];
 
                 function isClickable(btn) {
-                    return btn && !btn.disabled &&
+                    return Date.now() < submitDeadline && btn && !btn.disabled &&
                            !btn.classList.contains('v-btn--disabled') &&
                            !btn.classList.contains('disabledBtn');
                 }
@@ -2213,7 +2255,7 @@ async def nodriver_ticketplus_click_next_button_unified(tab, config_dict):
                 if (!nextButton) {
                     console.log('[WAITING] Waiting for next button to enable...');
                     return waitForButtonEnable('button.nextBtn, .nextBtn').then(button => {
-                        if (button) {
+                        if (button && isClickable(button)) {
                             console.log('[SUCCESS] Next button enabled');
                             button.click();
                             return {
@@ -2457,7 +2499,7 @@ async def nodriver_ticketplus_accept_order_fail(tab, debug=None):
         None  -- evaluate failed; popup state unknown (caller should skip order submission)
     """
     try:
-        js_result = await tab.evaluate('''
+        js_result = await _ticketplus_evaluate(tab, '''
             (function() {
                 const failureTexts = [
                     '購票失敗',
@@ -2533,7 +2575,7 @@ async def nodriver_ticketplus_check_queue_status(tab, config_dict, force_show_de
     debug = util.create_debug_logger(enabled=(config_dict.get("advanced", {}).get("verbose", False) or force_show_debug))
 
     try:
-        result = await tab.evaluate('''
+        result = await _ticketplus_evaluate(tab, '''
             (function() {
                 const queueKeywords = [
                     '\u6392\u968a\u8cfc\u7968\u4e2d',
@@ -2707,7 +2749,7 @@ async def nodriver_ticketplus_order(tab, config_dict, ocr, Captcha_Browser):
     if not await _ticketplus_refresh_is_ready(tab, debug):
         return
 
-    if await sleep_with_pause_check(tab, 0.05, config_dict):
+    if await _ticketplus_pause_delay(tab, 0.05, config_dict):
         debug.log("Paused during page wait")
         return
 
@@ -2747,7 +2789,7 @@ async def nodriver_ticketplus_order(tab, config_dict, ocr, Captcha_Browser):
         is_answer_sent, _state["fail_list"], is_question_popup = await nodriver_ticketplus_order_exclusive_code(tab, config_dict, _state["fail_list"])
 
         # Same here: a discretionary settle-pause before submitting, average unchanged.
-        if await sleep_with_pause_check(tab, util.scale_humanized_delay(0.25, 0.35, config_dict), config_dict):
+        if await _ticketplus_pause_delay(tab, util.scale_humanized_delay(0.25, 0.35, config_dict), config_dict):
             debug.log("Paused before form submission")
             return
         await nodriver_ticketplus_ticket_agree(tab, config_dict)
@@ -2877,7 +2919,7 @@ async def nodriver_ticketplus_order(tab, config_dict, ocr, Captcha_Browser):
                         else:
                             _state["float_btn_misses"] = 0
                             _state["spa_mounted"] = False
-                            await tab.reload()
+                            await asyncio.wait_for(tab.reload(), timeout=10.0)
                             debug.log("[AUTO RELOAD] Full page reload (update button missing repeatedly)")
                 except Exception as reload_exc:
                     debug.log(f"[AUTO RELOAD] Reload failed: {reload_exc}")
@@ -2898,7 +2940,7 @@ async def nodriver_ticketplus_wait_for_vue_ready(tab, max_wait_ms=800):
     try:
         await asyncio.sleep(0.15)
 
-        result = await tab.evaluate(f'''
+        result = await _ticketplus_evaluate(tab, f'''
             (function() {{
                 return new Promise((resolve) => {{
                     const startTime = Date.now();
@@ -2960,7 +3002,7 @@ async def nodriver_ticketplus_wait_for_vue_ready(tab, max_wait_ms=800):
 async def nodriver_ticketplus_check_next_button(tab):
     """Check if next button is enabled."""
     try:
-        result = await tab.evaluate('''
+        result = await _ticketplus_evaluate(tab, '''
             (function() {
                 const selectors = [
                     "div.order-footer button.nextBtn",
@@ -3017,7 +3059,7 @@ async def nodriver_ticketplus_order_exclusive_code(tab, config_dict, fail_list):
         code_js = json.dumps(discount_code)
         card_js = json.dumps(card_prefix)
 
-        result = await tab.evaluate(f'''
+        result = await _ticketplus_evaluate(tab, f'''
             (function() {{
                 // Strategy: structure first, labels only to break ties.
                 //
@@ -3289,7 +3331,7 @@ async def _nodriver_ticketplus_main_impl(tab, url, config_dict, ocr, Captcha_Bro
         is_homepage_target = config_homepage in ['https://ticketplus.com.tw', 'ticketplus.com.tw']
         if not is_homepage_target and url.lower() != config_dict["homepage"].lower():
             try:
-                await tab.get(config_dict["homepage"])
+                await asyncio.wait_for(tab.get(config_dict["homepage"]), timeout=10.0)
             except Exception as e:
                 pass
 
@@ -3380,7 +3422,7 @@ async def _nodriver_ticketplus_main_impl(tab, url, config_dict, ocr, Captcha_Bro
                     debug.log("[ORDER FAIL] Reloading page to refresh ticket availability")
                     try:
                         _state["spa_mounted"] = False
-                        await tab.reload()
+                        await asyncio.wait_for(tab.reload(), timeout=10.0)
                         await asyncio.sleep(0.5)
                     except Exception as reload_exc:
                         debug.log(f"[ORDER FAIL] Reload failed: {reload_exc}")

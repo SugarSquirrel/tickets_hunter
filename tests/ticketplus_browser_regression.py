@@ -8,10 +8,13 @@ import argparse
 import asyncio
 import importlib.util
 import json
+import re
 from pathlib import Path
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import zendriver as zd
@@ -231,6 +234,51 @@ async def run(args):
             gaps = [b - a for a, b in zip(stamps, stamps[1:])]
             assert min(gaps) >= 280, gaps
             print(f"PASS refresh pacing: 300ms interval with 200ms scan, measured gaps {[round(g) for g in gaps]}ms", flush=True)
+
+            await load(current)
+            current._state.clear()
+            await current.nodriver_ticketplus_main(
+                tab, "https://ticketplus.com.tw/order/event/session", config(["B區"]), None, None)
+            result = json.loads(await tab.evaluate("JSON.stringify(window.result)"))
+            assert result and result["zone"] == "B區" and result["count"] == 2, result
+            print("PASS platform entry: startup, Vue readiness, popup check, selection, code and next", flush=True)
+
+            await load(current)
+            clock = SimpleNamespace(time=lambda: 0, monotonic=time.monotonic)
+            real_evaluate = current._ticketplus_evaluate
+
+            async def expired_selection(tab, expression, **kwargs):
+                if "const keywords =" in expression:
+                    expression = re.sub(r"const selectionDeadline = \d+;", "const selectionDeadline = 0;", expression)
+                return await real_evaluate(tab, expression, **kwargs)
+
+            with patch.object(current, "_ticketplus_evaluate", expired_selection):
+                assert not await current.nodriver_ticketplus_unified_select(tab, config(["B區"]), ["B區"])
+            with patch.object(current, "time", clock):
+                assert await real_evaluate(tab, "(function(){window.lateAction=true; return true;})()") is None
+            assert await tab.evaluate("window.lateAction !== true")
+            count = await tab.evaluate("page.totalTicket")
+            assert count == 0, count
+            assert await current.nodriver_ticketplus_unified_select(tab, config(["B區"]), ["B區"])
+            await tab.evaluate("page.serialNumber='412345'; page.guarantee=true; sync();")
+            with patch.object(current, "time", clock):
+                assert not await current.nodriver_ticketplus_click_next_button_unified(tab, config(["B區"]))
+            assert json.loads(await tab.evaluate("JSON.stringify(window.result)")) is None
+            print("PASS expired actions: stale selection/submit scripts cannot click later", flush=True)
+
+            activity = Path(work) / "activity.html"
+            activity.write_text('''<html><body><div id="app"><div id="buyTicket">
+              <div class="sesstion-item">O'Reilly 2026
+              <button class="nextBtn" onclick="window.dateClicked=true">立即購買</button>
+              </div></div></div></body></html>''', encoding="utf-8")
+            await tab.get(activity.as_uri())
+            current._state.clear()
+            cfg = config([])
+            cfg["date_auto_select"]["date_keyword"] = json.dumps("O'Reilly")
+            cfg["tixcraft"]["auto_reload_coming_soon_page"] = False
+            assert await current.nodriver_ticketplus_date_auto_select(tab, cfg)
+            assert await tab.evaluate("window.dateClicked === true")
+            print("PASS date fallback: apostrophe keyword selects the intended purchase button", flush=True)
         finally:
             await browser.stop()
 

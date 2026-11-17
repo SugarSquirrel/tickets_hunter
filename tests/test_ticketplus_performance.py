@@ -198,6 +198,53 @@ class RefreshTests(unittest.IsolatedAsyncioTestCase):
             layout.assert_awaited_once()
             button.assert_not_awaited()
 
+    async def test_stalled_popup_read_returns_unknown_then_recovers(self):
+        async def stalled(*args, **kwargs):
+            await asyncio.Event().wait()
+
+        self.tab.evaluate.side_effect = stalled
+        with patch.object(tp, "CONST_TICKETPLUS_CDP_TIMEOUT_SEC", 0.02):
+            self.assertIsNone(await tp.nodriver_ticketplus_accept_order_fail(self.tab, self.debug))
+        self.tab.evaluate.side_effect = lambda *args, **kwargs: {"foundFailure": False}
+        self.assertFalse(await tp.nodriver_ticketplus_accept_order_fail(self.tab, self.debug))
+
+    async def test_stalled_main_page_read_never_selects_or_submits(self):
+        async def stalled(*args, **kwargs):
+            await asyncio.Event().wait()
+
+        tp._state.update(fail_list=[], spa_mounted=True, order_page_visited=True)
+        self.tab.evaluate.side_effect = stalled
+        cfg = {"advanced": {"verbose": False}}
+        with patch.object(tp, "CONST_TICKETPLUS_CDP_TIMEOUT_SEC", 0.02), \
+             patch.object(tp, "nodriver_ticketplus_accept_realname_card", AsyncMock(return_value=False)), \
+             patch.object(tp, "nodriver_ticketplus_order", AsyncMock()) as order:
+            status = await tp.nodriver_ticketplus_main(self.tab, self.tab.target.url, cfg, None, None)
+            order.assert_not_awaited()
+            self.assertFalse(status["purchase_completed"])
+
+    async def test_lost_refresh_click_reply_keeps_inflight_guard(self):
+        async def stalled():
+            await asyncio.Event().wait()
+
+        self.tab.button.click.side_effect = stalled
+        with patch.object(tp, "CONST_TICKETPLUS_CDP_TIMEOUT_SEC", 0.02):
+            await self.click()
+        self.assertIn("refresh_pending", tp._state)
+        await self.click()
+        self.tab.button.click.assert_awaited_once()
+
+    async def test_stalled_delay_is_bounded_and_cancellation_is_not_swallowed(self):
+        async def stalled(*args):
+            await asyncio.Event().wait()
+
+        with patch.object(tp, "sleep_with_pause_check", stalled), \
+             patch.object(tp, "CONST_TICKETPLUS_CDP_TIMEOUT_SEC", 0.02):
+            with self.assertRaises(asyncio.TimeoutError):
+                await tp._ticketplus_pause_delay(self.tab, 0, {})
+        self.tab.evaluate.side_effect = asyncio.CancelledError()
+        with self.assertRaises(asyncio.CancelledError):
+            await tp._ticketplus_evaluate(self.tab, "true")
+
 
 if __name__ == "__main__":
     unittest.main()
