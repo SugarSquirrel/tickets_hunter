@@ -526,12 +526,41 @@ async def _ticketplus_refresh_is_ready(tab, debug):
         return True
     if refresh["url"] != _ticketplus_current_url(tab):
         _state.pop("refresh_pending", None)
+        _state.pop("refresh_failed", None)
+        _state.pop("inventory_refresh_stalled", None)
         return True
     elapsed = time.monotonic() - refresh["started"]
     if elapsed >= CONST_TICKETPLUS_REFRESH_TIMEOUT_SEC:
         _state.pop("refresh_pending", None)
+        _state["refresh_failed"] = True
+        if refresh.get("kind") == "inventory":
+            _state["inventory_refresh_stalled"] = True
         debug.log("[REFRESH] Completion wait timed out; rechecking the page")
         return True
+
+    if refresh.get("kind") == "inventory":
+        try:
+            raw = await _ticketplus_evaluate(tab, '''JSON.stringify((function() {
+                var s = window.__ticketplusBotRefresh;
+                return s ? { owned: true, pending: s.pending, error: s.error }
+                         : { owned: false, pending: false };
+            })())''', timeout=1.0)
+            state = util.parse_nodriver_result(raw)
+            if isinstance(state, str):
+                state = json.loads(state)
+            if not isinstance(state, dict) or state.get("pending"):
+                return False
+            _state.pop("refresh_pending", None)
+            _state["refresh_failed"] = bool(state.get("error")) or not state.get("owned")
+            gap = _state.get("inventory_refresh_gap")
+            now = time.monotonic()
+            if gap is not None and now - _state.get("refresh_metrics_at", 0) >= 5.0:
+                print(f"[REFRESH] actual interval={gap:.3f}s, inventory={elapsed:.3f}s")
+                _state["refresh_metrics_at"] = now
+            debug.log(f"[REFRESH] Inventory ready after {elapsed:.3f}s")
+            return True
+        except Exception:
+            return False
 
     tracker = refresh["tracker"]
     if tracker and any(seq > refresh["sequence"] for seq, _ in tracker["pending"].values()):
@@ -602,6 +631,72 @@ async def _ticketplus_click_refresh_button(tab, debug):
     """
     if _state.get("refresh_pending"):
         return True  # A click is already in flight; do not start another refresh or F5.
+
+    # The site's button waits an extra 500ms AFTER productInit finishes, then
+    # refreshes unrelated event/session metadata. Reuse its inventory loader
+    # directly so that animation and background metadata do not set our cadence.
+    started = time.monotonic()
+    _state["refresh_pending"] = {"kind": "inventory", "url": _ticketplus_current_url(tab),
+                                "started": started}
+    try:
+        raw = await _ticketplus_evaluate(tab, '''JSON.stringify((function() {
+            var root = document.querySelector('#app');
+            var stack = root && root.__vue__ ? [root.__vue__] : [], guard = 0;
+            var owner = null, host = null;
+            while (stack.length && guard++ < 400) {
+                var cur = stack.shift();
+                if (!cur) continue;
+                if (!owner && Array.isArray(cur.tickets) && typeof cur.productInit === 'function') owner = cur;
+                if (!host && typeof cur.isRefresh === 'boolean' && typeof cur.updateInfo === 'function') host = cur;
+                if (cur.$children) stack = stack.concat(cur.$children);
+            }
+            if (!owner) return { native: false };
+            // Only use the fast path for the known inventory data contract.
+            if (owner.tickets.length && !owner.tickets.some(t => t.loadingStatusFinished === true)) return { native: false };
+            if (window.isEnquene || (host && host.isPending)) return { native: true, queued: true };
+            if (window.__ticketplusBotRefresh && window.__ticketplusBotRefresh.pending) return { native: true };
+            var ticketsBefore = owner.tickets, campaignBefore = owner.campaign, sessionBefore = owner.session;
+            var state = { pending: true, error: null };
+            window.__ticketplusBotRefresh = state;
+            Promise.resolve().then(function() { return owner.productInit(true); })
+                .then(function() { return owner.$nextTick ? owner.$nextTick() : undefined; })
+                .then(function() {
+                    if (owner.tickets === ticketsBefore || owner.loadingData === true ||
+                        owner.tickets.some(t => t.loadingStatusFinished !== true)) {
+                        throw new Error('Inventory data not ready');
+                    }
+                    state.pending = false;
+                    // Preserve the normal metadata update, with at most one in
+                    // flight. Its completion never blocks fresh inventory.
+                    var metadataUpdated = owner.campaign !== campaignBefore || owner.session !== sessionBefore;
+                    if (host && !metadataUpdated && !window.isEnquene && !window.__ticketplusBotInfoPending) {
+                        window.__ticketplusBotInfoPending = true;
+                        Promise.resolve().then(function() { return host.updateInfo(); })
+                            .catch(function() {}).then(function() { window.__ticketplusBotInfoPending = false; });
+                    }
+                }).catch(function(err) {
+                    state.error = String(err && err.message || err);
+                    state.pending = false;
+                });
+            return { native: true, started: true };
+        })())''')
+        result = util.parse_nodriver_result(raw)
+        if isinstance(result, str):
+            result = json.loads(result)
+        if isinstance(result, dict) and result.get("native"):
+            if result.get("started"):
+                same_page = _state.get("inventory_refresh_url") == _ticketplus_current_url(tab)
+                previous = _state.get("inventory_refresh_at") if same_page else None
+                _state["inventory_refresh_gap"] = started - previous if previous is not None else None
+                _state["inventory_refresh_at"] = started
+                _state["inventory_refresh_url"] = _ticketplus_current_url(tab)
+            _ticketplus_note_refresh(tab, started)
+            _state["spa_mounted"] = True
+            return True
+    except Exception as exc:
+        debug.log(f"[REFRESH] Inventory start response unknown: {exc}")
+        return True  # Keep the guard: the loader may already be running.
+    _state.pop("refresh_pending", None)
     tracker = await _ticketplus_refresh_tracker(tab)
     try:
         btn = await asyncio.wait_for(tab.query_selector('button.float-btn'), timeout=CONST_TICKETPLUS_CDP_TIMEOUT_SEC)
@@ -2749,8 +2844,8 @@ async def nodriver_ticketplus_order(tab, config_dict, ocr, Captcha_Browser):
     if not await _ticketplus_refresh_is_ready(tab, debug):
         return
 
-    if await _ticketplus_pause_delay(tab, 0.05, config_dict):
-        debug.log("Paused during page wait")
+    if await check_and_handle_pause(config_dict):
+        debug.log("Paused before selection")
         return
 
     if debug.enabled:
@@ -2777,8 +2872,11 @@ async def nodriver_ticketplus_order(tab, config_dict, ocr, Captcha_Browser):
 
     # One page scan for all priorities. The selector still waits on a chosen zone's
     # lazy body and tries lower priorities only when that zone cannot be selected.
-    is_price_assign_by_bot = await nodriver_ticketplus_unified_select(
-        tab, config_dict, keyword_array or [""])
+    if _state.pop("refresh_failed", False):
+        is_price_assign_by_bot = False
+    else:
+        is_price_assign_by_bot = await nodriver_ticketplus_unified_select(
+            tab, config_dict, keyword_array or [""])
 
     if is_price_assign_by_bot:
         if await check_and_handle_pause(config_dict):
@@ -2898,6 +2996,13 @@ async def nodriver_ticketplus_order(tab, config_dict, ocr, Captcha_Browser):
             else:
                 debug.log("[AUTO RELOAD] Refreshing ticket count...")
                 try:
+                    if _state.pop("inventory_refresh_stalled", False):
+                        # Abort the stalled page request rather than starting a
+                        # second loader over it. The queue gate above still applies.
+                        _state["spa_mounted"] = False
+                        _ticketplus_note_refresh(tab)
+                        await asyncio.wait_for(tab.reload(), timeout=10.0)
+                        return
                     # Also pace missing-button/error attempts, so the full-reload
                     # fallback cannot turn into a rapid retry loop.
                     _ticketplus_note_refresh(tab)

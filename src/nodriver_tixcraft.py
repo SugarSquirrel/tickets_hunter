@@ -759,7 +759,11 @@ async def main(args):
     ocr = None
     Captcha_Browser = None
     try:
-        if config_dict["ocr_captcha"]["enable"]:
+        # TicketPlus selects tickets and fills serial/card fields through Vue/DOM;
+        # it never calls OCR. Avoid loading an ONNX model for each open profile.
+        homepage_host = urllib.parse.urlsplit(config_dict.get("homepage", "")).hostname
+        ticketplus_without_ocr = homepage_host in ("ticketplus.com.tw", "www.ticketplus.com.tw")
+        if config_dict["ocr_captcha"]["enable"] and not ticketplus_without_ocr:
             ocr = create_ocr_for_platform(config_dict)
             if ocr is None:
                 ocr = ddddocr.DdddOcr(show_ad=False, beta=config_dict["ocr_captcha"]["beta"])

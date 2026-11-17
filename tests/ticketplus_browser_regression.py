@@ -128,7 +128,8 @@ async def run(args):
         spec.loader.exec_module(baseline)
         modules.insert(0, ("baseline", baseline))
 
-    with tempfile.TemporaryDirectory(prefix="ticketplus-test-") as work:
+    with tempfile.TemporaryDirectory(prefix="ticketplus-test-") as work, \
+         patch.object(util, "get_instance_state_path", lambda name: str(Path(work) / name)):
         browser = await zd.start(headless=True, browser_executable_path=args.chrome,
                                  user_data_dir=str(Path(work) / "profile"))
         try:
@@ -207,8 +208,8 @@ async def run(args):
             assert state["result"] and state["result"]["at"] >= state["readyAt"], state
             print("PASS slow refresh: one refresh, no stale clicks, code filled and next pressed after completion", flush=True)
 
-            # Simulate an expensive scan. Refresh pacing must count that work and
-            # let the main loop run between deadlines, without overlapping refreshes.
+            # This compatibility fixture has no inventory loader. The button
+            # fallback must still respect a minimum interval without overlapping.
             await load(current, refreshMs=80)
             cfg = config(["missing"])
             cfg["advanced"]["auto_reload_page_interval"] = 0.3
@@ -233,7 +234,7 @@ async def run(args):
                 tab.evaluate = original
             gaps = [b - a for a, b in zip(stamps, stamps[1:])]
             assert min(gaps) >= 280, gaps
-            print(f"PASS refresh pacing: 300ms interval with 200ms scan, measured gaps {[round(g) for g in gaps]}ms", flush=True)
+            print(f"PASS button fallback: minimum 300ms interval, measured gaps {[round(g) for g in gaps]}ms", flush=True)
 
             await load(current)
             current._state.clear()

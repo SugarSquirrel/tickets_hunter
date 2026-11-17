@@ -47,8 +47,9 @@ class RefreshTests(unittest.IsolatedAsyncioTestCase):
     async def test_inflight_request_blocks_selection_even_if_vue_is_idle(self):
         await self.click()
         await self.request()
+        calls_before = self.tab.evaluate.await_count
         self.assertFalse(await tp._ticketplus_refresh_is_ready(self.tab, self.debug))
-        self.tab.evaluate.assert_not_awaited()
+        self.assertEqual(self.tab.evaluate.await_count, calls_before)
 
     async def test_all_refresh_requests_must_finish(self):
         await self.click()
@@ -159,7 +160,7 @@ class RefreshTests(unittest.IsolatedAsyncioTestCase):
 
         queue = {"in_queue": False, "degraded": False, "source": "vue"}
         with patch.object(tp, "nodriver_ticketplus_read_queue_state", AsyncMock(return_value=queue)), \
-             patch.object(tp, "sleep_with_pause_check", AsyncMock(return_value=False)), \
+             patch.object(tp, "check_and_handle_pause", AsyncMock(return_value=False)), \
              patch.object(tp, "nodriver_ticketplus_unified_select", side_effect=scan), \
              patch.object(tp, "nodriver_ticketplus_detect_layout_style", AsyncMock()) as layout, \
              patch.object(tp, "nodriver_ticketplus_check_next_button", AsyncMock()) as button:
@@ -190,7 +191,7 @@ class RefreshTests(unittest.IsolatedAsyncioTestCase):
         queue = {"in_queue": False, "degraded": False, "source": "vue"}
         with patch.object(tp.util, "create_debug_logger", return_value=SimpleNamespace(enabled=True, log=lambda *a: None)), \
              patch.object(tp, "nodriver_ticketplus_read_queue_state", AsyncMock(return_value=queue)), \
-             patch.object(tp, "sleep_with_pause_check", AsyncMock(return_value=False)), \
+             patch.object(tp, "check_and_handle_pause", AsyncMock(return_value=False)), \
              patch.object(tp, "nodriver_ticketplus_unified_select", AsyncMock(return_value=False)), \
              patch.object(tp, "nodriver_ticketplus_detect_layout_style", AsyncMock(return_value={"style": 1})) as layout, \
              patch.object(tp, "nodriver_ticketplus_check_next_button", AsyncMock()) as button:
@@ -207,6 +208,53 @@ class RefreshTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(await tp.nodriver_ticketplus_accept_order_fail(self.tab, self.debug))
         self.tab.evaluate.side_effect = lambda *args, **kwargs: {"foundFailure": False}
         self.assertFalse(await tp.nodriver_ticketplus_accept_order_fail(self.tab, self.debug))
+
+    async def test_inventory_completion_ignores_unrelated_page_work(self):
+        replies = iter([{"native": True}, {"owned": True, "pending": False, "error": None}])
+        self.tab.evaluate.side_effect = lambda *a, **kw: json.dumps(next(replies))
+        await self.click()
+        self.assertEqual(tp._state["refresh_pending"]["kind"], "inventory")
+        self.assertTrue(await tp._ticketplus_refresh_is_ready(self.tab, self.debug))
+        self.tab.button.click.assert_not_awaited()
+        self.tab.send.assert_not_awaited()
+        self.assertFalse(tp._state["refresh_failed"])
+
+    async def test_inventory_inflight_prevents_overlap(self):
+        replies = iter([{"native": True}, {"owned": True, "pending": True}])
+        self.tab.evaluate.side_effect = lambda *a, **kw: json.dumps(next(replies))
+        await self.click()
+        self.assertFalse(await tp._ticketplus_refresh_is_ready(self.tab, self.debug))
+        await self.click()
+        self.assertEqual(self.tab.evaluate.await_count, 2)
+        self.tab.button.click.assert_not_awaited()
+
+    async def test_inventory_error_does_not_select_stale_tickets(self):
+        replies = iter([{"native": True}, {"owned": True, "pending": False, "error": "request failed"}])
+        self.tab.evaluate.side_effect = lambda *a, **kw: json.dumps(next(replies))
+        await self.click()
+        cfg = {"advanced": {"verbose": False, "auto_reload_page_interval": -1},
+               "area_auto_select": {"area_keyword": ""}}
+        queue = {"in_queue": False, "degraded": False, "source": "vue"}
+        with patch.object(tp, "nodriver_ticketplus_read_queue_state", AsyncMock(return_value=queue)), \
+             patch.object(tp, "check_and_handle_pause", AsyncMock(return_value=False)), \
+             patch.object(tp, "nodriver_ticketplus_unified_select", AsyncMock()) as select:
+            await tp.nodriver_ticketplus_order(self.tab, cfg, None, None)
+            select.assert_not_awaited()
+
+    async def test_stalled_inventory_reloads_once_only_when_not_queued(self):
+        for queued in (True, False):
+            tp._state.clear()
+            tp._state["refresh_pending"] = {"kind": "inventory", "url": self.tab.target.url, "started": 80.0}
+            self.tab.reload = AsyncMock()
+            cfg = {"advanced": {"verbose": False, "auto_reload_page_interval": 0},
+                   "area_auto_select": {"area_keyword": ""}}
+            queue = {"in_queue": queued, "degraded": False, "source": "vue"}
+            with patch.object(tp, "nodriver_ticketplus_read_queue_state", AsyncMock(return_value=queue)), \
+                 patch.object(tp, "check_and_handle_pause", AsyncMock(return_value=False)), \
+                 patch.object(tp, "nodriver_ticketplus_unified_select", AsyncMock()) as select:
+                await tp.nodriver_ticketplus_order(self.tab, cfg, None, None)
+                self.assertEqual(self.tab.reload.await_count, 0 if queued else 1)
+                select.assert_not_awaited()
 
     async def test_stalled_main_page_read_never_selects_or_submits(self):
         async def stalled(*args, **kwargs):
